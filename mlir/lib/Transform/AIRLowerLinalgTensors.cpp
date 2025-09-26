@@ -13,9 +13,9 @@
 #include "mlir/Conversion/LinalgToStandard/LinalgToStandard.h"
 #include "mlir/Dialect/Affine/IR/AffineOps.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
+#include "mlir/Dialect/Bufferization/IR/BufferizableOpInterface.h"
 #include "mlir/Dialect/Bufferization/IR/Bufferization.h"
 #include "mlir/Dialect/Bufferization/Transforms/Bufferize.h"
-#include "mlir/Dialect/Linalg/Transforms/BufferizableOpInterfaceImpl.h"
 #include "mlir/Dialect/Linalg/Transforms/Transforms.h"
 #include "mlir/Dialect/Math/IR/Math.h"
 #include "mlir/Pass/Pass.h"
@@ -28,22 +28,20 @@
 #define DEBUG_TYPE "air-lower-linalg-tensors"
 
 using namespace mlir;
-using namespace xilinx;
-using namespace xilinx::air;
 
 // Remove tensor_load followed by buffer_cast
 struct RemoveBufferCastPattern
-    : public OpRewritePattern<bufferization::ToMemrefOp> {
-  using OpRewritePattern<bufferization::ToMemrefOp>::OpRewritePattern;
+    : public OpRewritePattern<bufferization::ToBufferOp> {
+  using OpRewritePattern<bufferization::ToBufferOp>::OpRewritePattern;
 
-  LogicalResult matchAndRewrite(bufferization::ToMemrefOp op,
+  LogicalResult matchAndRewrite(bufferization::ToBufferOp op,
                                 PatternRewriter &rewriter) const override {
 
     auto load = op.getOperand().getDefiningOp<bufferization::ToTensorOp>();
     if (!load)
       return failure();
 
-    auto buffer = load.getMemref();
+    auto buffer = load.getBuffer();
     if (!buffer)
       return failure();
     rewriter.replaceOp(op, buffer);
@@ -142,36 +140,29 @@ void AIRLowerLinalgTensors::runOnOperation() {
   MLIRContext &context = getContext();
 
   ConversionTarget target(context);
-  bufferization::BufferizeTypeConverter typeConverter;
-  target.addLegalDialect<AIE::AIEDialect, affine::AffineDialect,
+  target.addLegalDialect<xilinx::AIE::AIEDialect, affine::AffineDialect,
                          math::MathDialect, memref::MemRefDialect,
                          func::FuncDialect, arith::ArithDialect>();
   target.addIllegalOp<tensor::EmptyOp, tensor::ExtractSliceOp,
                       tensor::InsertSliceOp>();
 
-  // Mark all Linalg operations illegal as long as they work on tensors.
-  auto isLegalOperation = [&](Operation *op) {
-    return typeConverter.isLegal(op);
-  };
-  target.addDynamicallyLegalDialect<linalg::LinalgDialect>(isLegalOperation);
-
-  bufferization::BufferizationOptions options =
-      bufferization::getPartialBufferizationOptions();
+  bufferization::BufferizationOptions options;
   options.opFilter.allowDialect<linalg::LinalgDialect>();
 
-  if (failed(bufferizeOp(getOperation(), options)))
+  bufferization::BufferizationState state;
+  if (failed(bufferizeOp(getOperation(), options, state)))
     signalPassFailure();
 
   RewritePatternSet patterns1(&context);
   patterns1.add<RemoveBufferCastPattern>(&context);
   // RemoveAllocCopyPattern,
   // RemoveTensorLoadStorePattern
-  (void)applyPatternsAndFoldGreedily(aie_module, std::move(patterns1));
+  (void)applyPatternsGreedily(aie_module, std::move(patterns1));
 
   RewritePatternSet patterns2(&context);
   linalg::populateLinalgNamedOpsGeneralizationPatterns(patterns2);
   patterns2.add<LowerLinalgOpPattern>(&context);
-  (void)applyPatternsAndFoldGreedily(aie_module, std::move(patterns2));
+  (void)applyPatternsGreedily(aie_module, std::move(patterns2));
 }
 
 namespace xilinx {

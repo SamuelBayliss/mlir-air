@@ -10,6 +10,7 @@
 
 #include "air/Transform/AffineLoopOptPass.h"
 #include "air/Util/Outliner.h"
+#include "air/Util/Util.h"
 
 #include "mlir/Dialect/Affine/Analysis/AffineAnalysis.h"
 #include "mlir/Dialect/Affine/Analysis/LoopAnalysis.h"
@@ -31,23 +32,9 @@
 #define DEBUG_TYPE "affine-loop-opt"
 
 using namespace mlir;
-using namespace xilinx::air;
 
-namespace {
-
-/// Returns the largest number that perfectly divides `num` that is less than or
-/// equal to max
-int findLargestFactor(int num, int max) {
-  if (num < max) {
-    return num;
-  }
-  for (int i = max; i > 0; i--) {
-    if (num % i == 0) {
-      return i;
-    }
-  }
-  return 1;
-}
+namespace xilinx {
+namespace air {
 
 class AffineLoopOptPass
     : public xilinx::air::impl::AffineLoopOptPassBase<AffineLoopOptPass> {
@@ -144,7 +131,7 @@ static affine::AffineForOp getLabel(affine::AffineForOp root, StringRef label) {
     if (!stringAttr)
       return WalkResult::advance();
     auto forOpCodegenName = stringAttr.getValue();
-    if (label.empty() || forOpCodegenName.equals(label)) {
+    if (label.empty() || forOpCodegenName == label) {
       res = forOp;
       return WalkResult::interrupt();
     }
@@ -160,7 +147,8 @@ void AffineLoopOptPass::tileLoops(
   // Tile each band.
   for (auto &band : *bands) {
 
-    assert(!band.empty());
+    if (band.empty())
+      return;
     auto stringAttr = band[0]->getAttrOfType<StringAttr>(
         AffineLoopOptPass::affineOptAttrName);
 
@@ -180,7 +168,7 @@ void AffineLoopOptPass::tileLoops(
           band[i].getStepAsInt();
       // Make sure the tile size divides the untiled size and is less than or
       // equal to the desired tile size.
-      actualTileSizes[i] = findLargestFactor(untiledSize, actualTileSizes[i]);
+      actualTileSizes[i] = air::findLargestFactor(untiledSize, actualTileSizes[i]);
     }
 
     if (failed(tilePerfectlyNested(band, actualTileSizes, &tiledNest)))
@@ -271,7 +259,8 @@ void AffineLoopOptPass::getTileableBands(
       }
 }
 
-} // namespace
+} // namespace air
+} // namespace xilinx
 
 namespace xilinx {
 namespace air {

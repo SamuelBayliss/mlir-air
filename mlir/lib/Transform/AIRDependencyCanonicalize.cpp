@@ -11,12 +11,11 @@
 #include "air/Util/Dependency.h"
 
 using namespace mlir;
-using namespace xilinx;
-using namespace xilinx::air;
 
 #define DEBUG_TYPE "air-dependency-canonicalize"
 
-namespace {
+namespace xilinx {
+namespace air {
 
 class AIRDependencyCanonicalize
     : public xilinx::air::impl::AIRDependencyCanonicalizeBase<
@@ -39,7 +38,8 @@ public:
       // Pre processing
       // Re-trace ops which depend on air.hierarchies
       // (Removes obsolete dep edges after -canonicalize)
-      canonicalizer.redoDepTraceIfDepOnHier(func);
+      if (failed(canonicalizer.redoDepTraceIfDepOnHier(func)))
+        signalPassFailure();
 
       // Parse dependency graphs
       hostGraph = dependencyGraph(func, true);
@@ -52,11 +52,6 @@ public:
       // Post processing
       // Update dependency list
       canonicalizer.updateDepList(func, trHostGraph);
-
-      // Clean up
-      canonicalizer.removeUnusedExecuteOp(func);
-      canonicalizer.removeRedundantWaitAllOps(func);
-      canonicalizer.removeDepListRepetition(func);
     }
   }
 
@@ -65,7 +60,8 @@ private:
   xilinx::air::dependencyContext dep_ctx;
 };
 
-} // namespace
+} // namespace air
+} // namespace xilinx
 
 namespace xilinx {
 namespace air {

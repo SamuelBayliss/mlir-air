@@ -6,20 +6,12 @@
 from air.ir import *
 from air.dialects.air import *
 from air.dialects.arith import AddIOp
-from air.dialects.func import FuncOp, ReturnOp
+
 
 def constructAndPrintInFunc(f):
-  print("\nTEST:", f.__name__)
-  with Context() as ctx, Location.unknown():
-    module = Module.create()
-    with InsertionPoint(module.body):
-      ftype = FunctionType.get([], [])
-      fop = FuncOp(f.__name__, ftype)
-      bb = fop.add_entry_block()
-      with InsertionPoint(bb):
-        f()
-        ReturnOp([])
-  print(module)
+    print("\nTEST:", f.__name__)
+    print(f())
+
 
 # CHECK-LABEL: TEST: test_herd
 # CHECK: air.launch
@@ -30,6 +22,7 @@ def constructAndPrintInFunc(f):
 # CHECK: arith.addi %[[X]], %[[Y]]
 # CHECK: arith.addi %[[SX]], %[[SY]]
 @constructAndPrintInFunc
+@module_builder
 def test_herd():
     @launch
     def launch_body():
@@ -37,11 +30,8 @@ def test_herd():
         def segment_body():
             idx_ty = IndexType.get()
             sz = arith.ConstantOp(idx_ty, IntegerAttr.get(idx_ty, 3))
+
             @herd(name="hrd", sizes=[2, sz])
             def herd_body(x, y, sx, sy):
                 AddIOp(x, y)
                 AddIOp(sx, sy)
-                HerdTerminatorOp()
-                return
-            SegmentTerminatorOp()
-        LaunchTerminatorOp()

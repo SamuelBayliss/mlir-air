@@ -86,7 +86,7 @@ jobs:
             apt update
             apt install -y rocm-hip-runtime-dev5.6.0 python3.10-venv \
                            libboost-all-dev pkg-config libelf-dev elfutils \
-                           libdwarf-dev libsysfs-dev clang libssl-dev
+                           libdwarf-dev libsysfs-dev clang libssl-dev uuid-dev
             apt-get clean
 
             cd /
@@ -107,14 +107,17 @@ jobs:
 
             pushd mlir-aie
             pip install -r python/requirements.txt
+            pip install -r python/requirements_ml.txt
+            pip install -r python/requirements_dev.txt
+            HOST_MLIR_PYTHON_PACKAGE_PREFIX=aie pip install -r python/requirements_extras.txt
             pip install joblib
 
-            pushd runtime_lib/xaiengine/aie-rt/driver/src
+            pushd third_party/aie-rt/driver/src
             make -f Makefile.Linux CFLAGS="-D__AIEAMDAIR__"
             popd
             mkdir -p /install/aie-rt/lib
-            cp -a runtime_lib/xaiengine/aie-rt/driver/src/*.so* /install/aie-rt/lib
-            cp -a runtime_lib/xaiengine/aie-rt/driver/include /install/aie-rt
+            cp -a third_party/aie-rt/driver/src/*.so* /install/aie-rt/lib
+            cp -a third_party/aie-rt/driver/include /install/aie-rt
 
             VERSION=$(utils/clone-llvm.sh --get-wheel-version)
             pip -q download mlir==$VERSION \
@@ -129,6 +132,7 @@ jobs:
             export PATH=/opt/Xilinx/Vitis/2023.2/bin:/opt/Xilinx/Vitis/2023.2/aietools/bin:$PATH
             cmake .. -G Ninja \
               -DMLIR_DIR=$PWD/../mlir/lib/cmake/mlir \
+              -DCMAKE_BUILD_TYPE=Release \
               -DVITIS_ROOT=/opt/Xilinx/Vitis/2023.2/ \
               -DVitis_VERSION_MAJOR=2023 \
               -DVitis_VERSION_MINOR=2 \
@@ -185,5 +189,5 @@ jobs:
             ninja check-air-cpp
             ninja check-air-mlir
             ninja check-air-python
-            ninja check-air-e2e
+            ninja check-air-e2e -j1
             popd

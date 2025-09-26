@@ -62,6 +62,8 @@ declare_mlir_python_extension(AirPythonExtensions.MLIR
     AIRCAPI
   PRIVATE_LINK_LIBS
     LLVMSupport
+  PYTHON_BINDINGS_LIBRARY
+    nanobind
 )
 
 # Only building this if we are building the hsa runtime, as it requires hsa.h
@@ -77,6 +79,8 @@ if(hsa-runtime64_FOUND)
       AIRCAPI
     PRIVATE_LINK_LIBS
       LLVMSupport
+    PYTHON_BINDINGS_LIBRARY
+      nanobind
   )
 endif()
 
@@ -94,6 +98,8 @@ add_mlir_python_common_capi_library(AirAggregateCAPI
     AirPythonExtensions
 )
 
+# Set NB_DOMAIN for nanobind, to avoid domain conflict with other llvm projects.
+set(MLIR_BINDINGS_PYTHON_NB_DOMAIN "_air")
 add_mlir_python_modules(AirMLIRPythonModules
   ROOT_PREFIX "${AIR_PYTHON_PACKAGES_DIR}/air"
   INSTALL_PREFIX "python/air"
@@ -105,7 +111,6 @@ add_mlir_python_modules(AirMLIRPythonModules
     AirPythonExtensions
   COMMON_CAPI_LINK_LIBS
     AirAggregateCAPI
-    AIRCAPI
   )
 
 add_mlir_python_modules(AirPythonModules

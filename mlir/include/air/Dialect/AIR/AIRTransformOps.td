@@ -54,6 +54,40 @@ def SegmentToAIEOp : Op<Transform_Dialect, "air.segment_to_aie",
   }];
 }
 
+def LinalgToLibraryCallOp : Op<Transform_Dialect, "air.linalg_to_library_call",
+    [FunctionalStyleTransformOpTrait, MemoryEffectsOpInterface,
+     TransformOpInterface, TransformEachOpTrait]> {
+  let summary = "Convert a linalg op to a function call (library call)";
+  let description = [{
+    Replaces a linalg op with a call to a function. If the `function_name`
+    attribute is provided, it is used as the function name. Otherwise, the
+    linalg op's `library_call` attribute is used. The function is created if
+    it does not exist. If the `link_with` attribute is provided, it is used
+    to link the function call to a prebuilt object that contains the 
+    implementation of the function. If the linalg op is inside a herd, the 
+    `link_with` attribute is propagated to the herd.
+
+    Example:
+    ```
+    %matmul = transform.structured.match ops{["linalg.matmul"]} in %f : (!pdl.operation) -> !pdl.operation
+    %call = transform.air.linalg_to_library_call %matmul { function_name = "my_matmul", link_with = "extern_func.o" } : (!pdl.operation) -> !pdl.operation
+    ```
+  }];
+  let arguments = (ins PDL_Operation:$target,
+                   OptionalAttr<StrAttr>:$function_name,
+                   OptionalAttr<StrAttr>:$link_with);
+  let results = (outs PDL_Operation:$result);
+  let assemblyFormat = "$target attr-dict `:` functional-type(operands, results)";
+
+  let extraClassDeclaration = [{
+    ::mlir::DiagnosedSilenceableFailure applyToOne(
+        ::mlir::transform::TransformRewriter &rewriter,
+        ::mlir::Operation *target,
+        ::mlir::transform::ApplyToEachResultList &results,
+        ::mlir::transform::TransformState &state);
+  }];
+}
+
 // Ops implemented in mlir/lib/Conversion/ConvertToAIRPass.cpp
 //
 
@@ -103,6 +137,28 @@ def ParToLaunchOp : Op<Transform_Dialect, "air.par_to_launch",
   }];
 }
 
+def ParToSegmentOp : Op<Transform_Dialect, "air.par_to_segment",
+    [FunctionalStyleTransformOpTrait, MemoryEffectsOpInterface,
+    TransformOpInterface, TransformEachOpTrait]> {
+  let description = [{
+    Transform a `scf.parallel` operation into a `air.segment` operation.
+    Returns the new `air.segment` operation.
+  }];
+  let arguments =
+    (ins PDL_Operation:$target,
+     DefaultValuedAttr<BoolAttr, "false">:$has_air_segment);
+  let results = (outs PDL_Operation:$result);
+  let assemblyFormat = "$target attr-dict";
+
+  let extraClassDeclaration = [{
+    ::mlir::DiagnosedSilenceableFailure applyToOne(
+        ::mlir::transform::TransformRewriter &rewriter,
+        ::mlir::scf::ParallelOp target,
+        ::mlir::transform::ApplyToEachResultList &results,
+        ::mlir::transform::TransformState &state);
+  }];
+}
+
 def CopyToDmaOp : Op<Transform_Dialect, "air.copy_to_dma",
     [FunctionalStyleTransformOpTrait, MemoryEffectsOpInterface,
     TransformOpInterface, TransformEachOpTrait]> {
@@ -122,6 +178,19 @@ def CopyToDmaOp : Op<Transform_Dialect, "air.copy_to_dma",
         ::mlir::transform::ApplyToEachResultList &results,
         ::mlir::transform::TransformState &state);
   }];
+}
+
+def ForallWithReduceToParallelOp : Op<Transform_Dialect, "air.forall_with_reduce_to_parallel",
+    [FunctionalStyleTransformOpTrait, MemoryEffectsOpInterface,
+     DeclareOpInterfaceMethods<TransformOpInterface>]> {
+  let summary = "Converts a pattern of scf.forall and linalg.reduce to scf.parallel";
+  let description = [{
+    .
+  }];
+  let arguments = (ins PDL_Operation:$target);
+  let results = (outs Variadic<PDL_Operation>:$transformed);
+
+  let assemblyFormat = "$target attr-dict `:` functional-type(operands, results)";
 }
 
 // Ops implemented in mlir/lib/Transform/AIRLinalgCodegen.cpp
@@ -209,29 +278,25 @@ def LinalgTileOp : Op<Transform_Dialect, "air.linalg_tile",
        [DeclareOpInterfaceMethods<TransformOpInterface>,
         DeclareOpInterfaceMethods<MemoryEffectsOpInterface>]> {
   let description = [{
-    Tile a linalg operation with the given sizes. Optionally apply an
-    interchange of the resulting loops. The new linalg operantion and all
-    generated loops are returned. Tiling is performed with the
-    `linalg::LinalgTilingLoopType::ParallelLoops` so that `scf.parallel`
-    loops are generated whenever possible.
+    Tile a linalg operation with the given sizes. The new linalg 
+    operantion and the generated loop are returned. Tiling is 
+    performed with the `transform::tileToForallOpImpl` so that an
+    `scf.forall` loop is generated whenever possible.
 
-    This is a variant of `transform.structured.tile`.
+    This is a variant of `transform.structured.tile_using_forall`.
   }];
 
   let arguments = (ins PDL_Operation:$target,
                    Variadic<PDL_Operation>:$dynamic_sizes,
-                   DefaultValuedOptionalAttr<DenseI64ArrayAttr, "{}">:$static_sizes,
-                   DefaultValuedOptionalAttr<DenseI64ArrayAttr, "{}">:$interchange
+                   DefaultValuedOptionalAttr<DenseI64ArrayAttr, "{}">:$static_sizes
                    );
   let results = (outs PDL_Operation:$tiled_linalg_op,
-                      Variadic<PDL_Operation>:$loops);
+                      PDL_Operation:$loops);
   let builders = [
     OpBuilder<(ins "Value":$target,
-                   "ArrayRef<int64_t>":$staticTileSizes,
-                   CArg<"ArrayRef<int64_t>", "{}">:$interchange)>,
+                   "ArrayRef<int64_t>":$staticTileSizes)>,
     OpBuilder<(ins "Value":$target,
-                   "ArrayRef<OpFoldResult>":$mixedTileSizes,
-                   CArg<"ArrayRef<int64_t>", "{}">:$interchange)>
+                   "ArrayRef<OpFoldResult>":$mixedTileSizes)>
   ];
 
   let hasCustomAssemblyFormat = 1;
@@ -279,6 +344,174 @@ def FuseIntoContainingMemrefOp :
   let builders = [
     OpBuilder<(ins "Value":$producerOp, "Value":$containingOp)>
   ];
+}
+
+def RemoveUninitializedCopyOp : Op<Transform_Dialect, "air.remove_uninitialized_copy",
+    [FunctionalStyleTransformOpTrait, MemoryEffectsOpInterface,
+     DeclareOpInterfaceMethods<TransformOpInterface>]> {
+  let summary = "Remove copy operations that copy from uninitialized memrefs";
+  let description = [{
+    This transform walks through a func.func operation and identifies memref.copy 
+    and linalg.copy operations where the source is an uninitialized memref 
+    (allocated but not written to). Such copy operations are erased as they copy 
+    undefined data.
+    
+    The transform detects the pattern where:
+    1. A memref is allocated with memref.alloc
+    2. A subview of that memref is created (optional)
+    3. The memref/subview is used as source in memref.copy or linalg.copy before any write operations
+    
+    Returns a handle to the modified function.
+    
+    Examples:
+    ```mlir
+    // memref.copy case
+    %alloc = memref.alloc() : memref<2x16x8xi32, 1>
+    %subview = memref.subview %alloc[0, 0, 0] [1, 16, 8] [1, 1, 1] : ...
+    %target = memref.alloc() : memref<1x16x8xi32, 2>
+    memref.copy %subview, %target  // <- This copy will be erased
+    
+    // linalg.copy case
+    %alloc2 = memref.alloc() : memref<16x8xi32, 1>
+    %target2 = memref.alloc() : memref<16x8xi32, 2>
+    linalg.copy ins(%alloc2 : memref<16x8xi32, 1>) outs(%target2 : memref<16x8xi32, 2>)  // <- This copy will be erased
+    ```
+  }];
+  
+  let arguments = (ins PDL_Operation:$target);
+  let results = (outs PDL_Operation:$result);
+  let assemblyFormat = "$target attr-dict";
+}
+
+def EliminateCascadeMemcpyOp : Op<Transform_Dialect, "air.eliminate_cascade_memcpy",
+    [FunctionalStyleTransformOpTrait, MemoryEffectsOpInterface,
+     DeclareOpInterfaceMethods<TransformOpInterface>]> {
+  let summary = "Eliminate intermediate memref buffers in cascaded DMA operations";
+  let description = [{
+    This transform identifies and eliminates intermediate memref buffers in cascaded 
+    air.dma_memcpy_nd operations. It looks for the pattern where an intermediate buffer
+    is used exactly twice: once as the destination of a DMA operation and once as the
+    source of another DMA operation, with both operations using default access patterns
+    (empty offsets, sizes, and strides).
+    
+    The transformation replaces:
+    ```mlir
+    air.dma_memcpy_nd (%intermediate[] [] [], %source[] [] []) : (memref<...>, memref<...>)
+    air.dma_memcpy_nd (%dest[] [] [], %intermediate[] [] []) : (memref<...>, memref<...>)
+    ```
+    
+    With:
+    ```mlir
+    air.dma_memcpy_nd (%dest[] [] [], %source[] [] []) : (memref<...>, memref<...>)
+    ```
+    
+    This optimization eliminates unnecessary intermediate memory allocations and reduces
+    memory traffic, which is particularly beneficial for cascade patterns in AIR programs.
+    
+    Returns a handle to the modified operation.
+  }];
+  
+  let arguments = (ins PDL_Operation:$target);
+  let results = (outs PDL_Operation:$result);
+  let assemblyFormat = "$target attr-dict";
+}
+
+def ConvertMemrefCopyToLinalgCopyOp : Op<Transform_Dialect, "air.convert_memref_copy_to_linalg_copy",
+    [FunctionalStyleTransformOpTrait, MemoryEffectsOpInterface,
+     DeclareOpInterfaceMethods<TransformOpInterface>]> {
+  let summary = "Convert memref.copy operations to linalg.copy operations";
+  let description = [{
+    This transform converts `memref.copy` operations to `linalg.copy` operations.
+    This can be useful for enabling further linalg-based optimizations and transformations.
+    
+    The transformation replaces:
+    ```mlir
+    memref.copy %source, %dest : memref<...> to memref<...>
+    ```
+    
+    With:
+    ```mlir
+    linalg.copy ins(%source : memref<...>) outs(%dest : memref<...>)
+    ```
+    
+    Returns a handle to the modified operation containing the transformed copies.
+  }];
+  
+  let arguments = (ins PDL_Operation:$target);
+  let results = (outs PDL_Operation:$result);
+  let assemblyFormat = "$target attr-dict";
+}
+
+// Ops implemented in mlir/lib/Transform/AIRLinalgBufferize.cpp
+//
+
+def AIRHoistStaticAllocOp :  Op<Transform_Dialect, "air.hoist_static_alloc",
+    [DeclareOpInterfaceMethods<MemoryEffectsOpInterface>,
+     TransformEachOpTrait,
+     TransformOpInterface,
+     ReportTrackingListenerFailuresOpTrait]> {
+  let summary = [{Hoist static allocations.}];
+  let description = [{
+    Moves certain statically-sized `memref.alloc` operations from inner blocks
+    to the entry block of the target function. This shortens and unifies buffer
+    lifetimes, which can unlock reuse and downstream optimizations.
+
+    ### Notes / limitations
+
+    * Currently targets `memref.alloc` buffers with static shapes.
+    * Uses that require exact type equality across region boundaries (e.g.,
+      `scf.yield`, `func.return`) are **not** rewritten; such allocations are skipped.
+    * Hoisting increases the buffer's lifetime; apply with care on large buffers.
+
+    ### Example
+
+    Before:
+    ```mlir
+    func.func @foo(%arg0: memref<64xi32>) {
+      scf.for %i = %c0 to %c4 step %c1 {
+        %tmp = memref.alloc() : memref<64xi32>
+        linalg.fill ins(%cst : i32) outs(%tmp : memref<64xi32>)
+        memref.dealloc %tmp : memref<64xi32>
+      }
+      return
+    }
+    ```
+
+    After:
+    ```mlir
+    func.func @foo(%arg0: memref<64xi32>) {
+      %tmp.hoisted = memref.alloc() : memref<64xi32>
+      scf.for %i = %c0 to %c4 step %c1 {
+        linalg.fill ins(%cst : i32) outs(%tmp.hoisted : memref<64xi32>)
+      }
+      memref.dealloc %tmp.hoisted : memref<64xi32>
+      return
+    }
+    ```
+
+    ### Usage (Transform dialect)
+
+    ```mlir
+    transform.sequence %arg0 : !pdl.operation failures(propagate) {
+    ^bb0(%f: !pdl.operation):
+      transform.air.hoist_static_alloc %f
+        : (!pdl.operation) -> ()
+    }
+    ```
+  }];
+
+  let arguments = (ins PDL_Operation:$target);
+  let results = (outs);
+
+  let assemblyFormat = "$target attr-dict `:` functional-type(operands, results)";
+
+  let extraClassDeclaration = [{
+    ::mlir::DiagnosedSilenceableFailure applyToOne(
+        ::mlir::transform::TransformRewriter &rewriter,
+        ::mlir::FunctionOpInterface funcOp,
+        ::mlir::transform::ApplyToEachResultList &results,
+        ::mlir::transform::TransformState &state);
+  }];
 }
 
 #endif // AIR_TRANSFORM_OPS

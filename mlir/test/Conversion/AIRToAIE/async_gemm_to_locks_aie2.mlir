@@ -5,12 +5,11 @@
 //
 //===----------------------------------------------------------------------===//
 
-// RUN: air-opt -air-fuse-channels="aggressive-mode=true" -air-place-herds='num-rows=2 num-cols=2 row-anchor=3 col-anchor=5' -air-to-aie="emit-while-loop=false use-objectfifo=false row-offset=3 col-offset=5 device=xcve2802" %s | FileCheck %s
+// RUN: air-opt -air-fuse-channels="aggressive-mode=L1,L2,L3" -air-place-herds='num-rows=2 num-cols=2 row-anchor=3 col-anchor=5' -air-to-aie="emit-while-loop=false use-objectfifo=false row-offset=3 col-offset=5 device=xcve2802" %s | FileCheck %s
 
 // CHECK-LABEL:   aie.device(xcve2802) {
 // CHECK:   %[[VAL_0:.*]] = aie.tile(2, 0)
 // CHECK:   %[[VAL_1:.*]] = aie.tile(5, 1)
-// CHECK:   %[[VAL_2:.*]] = aie.tile(6, 1)
 // CHECK:   %[[VAL_3:.*]] = aie.tile(5, 3)
 // CHECK:   %[[VAL_4:.*]] = aie.tile(6, 3)
 // CHECK:   %[[VAL_5:.*]] = aie.tile(5, 4)
@@ -240,7 +239,6 @@ module {
               }
               scf.yield %25 : !air.async.token
             }
-            air.herd_terminator
           }
           %18 = air.channel.put async [%17]  @channel_7[] (%results_23[] [] []) {id = 16 : i32} : (memref<64x64xi32, 1>)
           %async_token_24 = air.execute [%10] {
@@ -255,9 +253,7 @@ module {
           %19 = air.wait_all async [%16, %15, %14, %18, %13] 
           scf.yield %19 : !air.async.token
         }
-        air.segment_terminator
       }
-      air.launch_terminator
     }
     return
   }

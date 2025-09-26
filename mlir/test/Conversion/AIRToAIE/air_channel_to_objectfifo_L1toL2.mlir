@@ -13,7 +13,7 @@
 // CHECK:    %[[VAL_3:.*]] = aie.tile(2, 0)
 // CHECK:    aie.objectfifo @air_channel_1(%[[VAL_0]], {%[[VAL_2]]}, 1 : i32) : !aie.objectfifo<memref<32xi32>>
 // CHECK:    aie.objectfifo @air_channel_0(%[[VAL_3]], {%[[VAL_0]]}, 1 : i32) : !aie.objectfifo<memref<32xi32>>
-// CHECK:    aie.objectfifo.link [@air_channel_0] -> [@air_channel_1]()
+// CHECK:    aie.objectfifo.link [@air_channel_0] -> [@air_channel_1]([] [])
 // CHECK:    %[[VAL_4:.*]] = aie.core(%[[VAL_2]]) {
 // CHECK:      %[[VAL_5:.*]] = aie.objectfifo.acquire @air_channel_1(Consume, 1) : !aie.objectfifosubview<memref<32xi32>>
 // CHECK:      %[[VAL_6:.*]] = aie.objectfifo.subview.access %[[VAL_5]][0] : !aie.objectfifosubview<memref<32xi32>> -> memref<32xi32>
@@ -63,11 +63,8 @@ module {
             %async_token_3 = air.execute [%9] {
               memref.dealloc %results_2 : memref<32xi32, 2>
             }
-            air.herd_terminator
         }
-        air.segment_terminator
       }
-      air.launch_terminator
     }
     return
   }

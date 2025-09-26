@@ -11,6 +11,17 @@ on:
     types: [assigned, opened, synchronize, reopened, ready_for_review]
   workflow_dispatch:
 
+defaults:
+  run:
+    shell: bash
+
+concurrency:
+  # A PR number if a pull request and otherwise the commit hash. This cancels
+  # queued and in-progress runs for the same PR (presubmit) or commit
+  # (postsubmit).
+  group: ci-build-test-air-compiler-only-linux-${{ github.event.number || github.sha }}
+  cancel-in-progress: true
+
 jobs:
   build-repo:
     name: Build and Test
@@ -20,7 +31,7 @@ jobs:
       fail-fast: false
       matrix:
         build_type: [ Assert, Release ]
-        ubuntu_version: [ 20.04, 22.04 ]
+        ubuntu_version: [ 22.04 ]
 
     steps:
       # Clone the repo and its submodules. Do shallow clone to save clone
@@ -31,23 +42,9 @@ jobs:
           fetch-depth: 2
           submodules: "true"
 
-      - name: Upgrade gcc
-        if: matrix.ubuntu_version == '20.04'
-        run: |
-          sudo apt install build-essential manpages-dev software-properties-common
-          sudo add-apt-repository ppa:ubuntu-toolchain-r/test
-          GCC_VERSION=11
-          sudo apt update && sudo apt install gcc-$GCC_VERSION g++-$GCC_VERSION
-          sudo update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-9 90 \
-            --slave /usr/bin/g++ g++ /usr/bin/g++-9 \
-            --slave /usr/bin/gcov gcov /usr/bin/gcov-9 \
-            --slave /usr/bin/gcc-ar gcc-ar /usr/bin/gcc-ar-9 \
-            --slave /usr/bin/gcc-ranlib gcc-ranlib /usr/bin/gcc-ranlib-9
-          sudo update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-$GCC_VERSION 110 \
-            --slave /usr/bin/g++ g++ /usr/bin/g++-$GCC_VERSION \
-            --slave /usr/bin/gcov gcov /usr/bin/gcov-$GCC_VERSION \
-            --slave /usr/bin/gcc-ar gcc-ar /usr/bin/gcc-ar-$GCC_VERSION \
-            --slave /usr/bin/gcc-ranlib gcc-ranlib /usr/bin/gcc-ranlib-$GCC_VERSION
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
 
       - name: Install packages
         run: sudo apt-get install -y libboost-all-dev clang lld && sudo apt-get clean
@@ -57,60 +54,37 @@ jobs:
 
       - name: Get Submodule Hash
         id: get-submodule-hash
-        run: echo "::set-output name=hash::$(md5sum $(echo utils/clone-llvm.sh))"
-        shell: bash
+        run: echo "::set-output name=hash::$(md5sum $(echo utils/clone-mlir-aie.sh))"
 
       - name: Ccache for C++ compilation
-        uses: hendrikmuhs/ccache-action@4687d037e4d7cf725512d9b819137a3af34d39b3
+        uses: hendrikmuhs/ccache-action@v1.2
         with:
           key: ${{ matrix.build_type }}-${{ runner.os }}-${{ matrix.ubuntu_version }}
           max-size: 1G
 
+      - name: Build and Install libxaie
+        run: utils/github-clone-build-libxaie.sh
+
       - name: Get mlir-aie
         id: clone-mlir-aie
         run: utils/clone-mlir-aie.sh
-        shell: bash
 
-      - name: Install pip packages
+      - name: Build and install mlir-aie
         run: |
           pushd mlir-aie
           pip install -r python/requirements.txt
+          pip install -r python/requirements_ml.txt
+          pip install -r python/requirements_dev.txt
+          HOST_MLIR_PYTHON_PACKAGE_PREFIX=aie pip install -r python/requirements_extras.txt
+
+          VERSION=$(utils/clone-llvm.sh --get-wheel-version)
+          pip -q download mlir==$VERSION \
+            -f https://github.com/Xilinx/mlir-aie/releases/expanded_assets/mlir-distro
+          unzip -q mlir-*.whl
+          find mlir -exec touch -a -m -t 201108231405.14 {} \;
           popd
 
-      - name: Get LLVM
-        id: clone-llvm
-        run: utils/clone-llvm.sh
-        shell: bash
-        
-      - name: Rebuild and Install LLVM
-        run: utils/github-build-llvm.sh
-
-      - name: Rebuild and Install libxaie
-        run: utils/github-clone-build-libxaie.sh
-
-      - name: Rebuild and Install mlir-aie
-        run: |
-          mkdir -p mlir-aie/build
-          mkdir -p mlir-aie/install
-          pushd mlir-aie/build
-          cmake .. \
-              -GNinja \
-              -DCMAKE_BUILD_TYPE=Release \
-              -DAIE_COMPILER=NONE \
-              -DAIE_LINKER=NONE \
-              -DHOST_COMPILER=NONE \
-              -DLLVM_ENABLE_ASSERTIONS=ON \
-              -DCMAKE_MODULE_PATH=`pwd`/../cmake/modulesXilinx \
-              -DMLIR_DIR=`pwd`/../../llvm/install/lib/cmake/mlir/ \
-              -DLLVM_DIR=`pwd`/../../llvm/install/lib/cmake/llvm/ \
-              -DCMAKE_LINKER=lld \
-              -DLLVM_EXTERNAL_LIT=$(which lit) \
-              -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
-              -DLibXAIE_x86_64_DIR=`pwd`/../../aienginev2/install/lib \
-              -DCMAKE_INSTALL_PREFIX=`pwd`/../install
-          ninja install
-          popd
-          rm -rf mlir-aie/build
+          utils/github-build-mlir-aie.sh
 
       # Build the repo test target in debug mode to build and test.
       - name: Build and test (Assert)
@@ -124,8 +98,8 @@ jobs:
             -DCMAKE_BUILD_TYPE=Debug \
             -DLLVM_ENABLE_ASSERTIONS=ON \
             -DCMAKE_MODULE_PATH=`pwd`/../mlir-aie/cmake/modulesXilinx \
-            -DMLIR_DIR=`pwd`/../llvm/install/lib/cmake/mlir/ \
-            -DLLVM_DIR=`pwd`/../llvm/install/lib/cmake/llvm/ \
+            -DMLIR_DIR=`pwd`/../mlir-aie/mlir/lib/cmake/mlir \
+            -DLLVM_DIR=`pwd`/../mlir-aie/mlir/lib/cmake/llvm \
             -DAIE_DIR=`pwd`/../mlir-aie/install/lib/cmake/aie/ \
             -DLibXAIE_ROOT=`pwd`/../aienginev2/install \
             -DAIR_RUNTIME_TARGETS:STRING="x86_64" \
@@ -152,8 +126,8 @@ jobs:
             -DCMAKE_BUILD_TYPE=Release \
             -DLLVM_ENABLE_ASSERTIONS=OFF \
             -DCMAKE_MODULE_PATH=`pwd`/../mlir-aie/cmake/modulesXilinx \
-            -DMLIR_DIR=`pwd`/../llvm/install/lib/cmake/mlir/ \
-            -DLLVM_DIR=`pwd`/../llvm/install/lib/cmake/llvm/ \
+            -DMLIR_DIR=`pwd`/../mlir-aie/mlir/lib/cmake/mlir \
+            -DLLVM_DIR=`pwd`/../mlir-aie/mlir/lib/cmake/llvm \
             -DAIE_DIR=`pwd`/../mlir-aie/install/lib/cmake/aie/ \
             -DLibXAIE_ROOT=`pwd`/../aienginev2/install \
             -DAIR_RUNTIME_TARGETS:STRING="x86_64" \

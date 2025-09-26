@@ -35,7 +35,7 @@ if(NOT AIR_BINARY_DIR)
 find_package(AIR REQUIRED CONFIG)
 endif()
 
-find_package(Vitis 2023.2)
+find_package(Vitis 2023.2 COMPONENTS AIE AIE2)
 find_package(XRT)
 
 message(STATUS "Using MLIRConfig.cmake in: ${MLIR_DIR}")
@@ -88,15 +88,43 @@ set(TEST_DEPENDS
   FileCheck count not
   )
 
-add_lit_testsuite(check-air-e2e "Running the air end-to-end tests"
+# Peano-only test suite
+add_lit_testsuite(check-air-e2e-peano "Running AIR E2E tests (Peano backend only)"
+  ${CMAKE_CURRENT_BINARY_DIR}
+  DEPENDS ${TEST_DEPENDS}
+  ARGS ${AIR_TEST_LIT_ARGS} --filter "peano"
+)
+set_target_properties(check-air-e2e-peano PROPERTIES FOLDER "Tests")
+
+# Chess-only test suite
+add_lit_testsuite(check-air-e2e-chess "Running AIR E2E tests (Chess backend only)"
+  ${CMAKE_CURRENT_BINARY_DIR}
+  DEPENDS ${TEST_DEPENDS}
+  ARGS ${AIR_TEST_LIT_ARGS} --filter "chess"
+)
+set_target_properties(check-air-e2e-chess PROPERTIES FOLDER "Tests")
+
+# AIR-Runner-only test suite
+add_lit_testsuite(check-air-runner "Running AIR-Runner tests (simulation only)"
+  ${CMAKE_CURRENT_BINARY_DIR}
+  DEPENDS ${TEST_DEPENDS}
+  ARGS ${AIR_TEST_LIT_ARGS} --filter "airrunner"
+)
+set_target_properties(check-air-e2e-peano PROPERTIES FOLDER "Tests")
+
+add_dependencies(check-all check-air-runner)
+# Unfiltered full test suite
+add_lit_testsuite(check-air-e2e "Running AIR E2E tests (all backends)"
   ${CMAKE_CURRENT_BINARY_DIR}
   DEPENDS ${TEST_DEPENDS}
   ARGS ${AIR_TEST_LIT_ARGS}
-  )
+)
 set_target_properties(check-air-e2e PROPERTIES FOLDER "Tests")
 
 add_custom_target(build-check-air)
 add_dependencies(check-air-e2e build-check-air)
+add_dependencies(check-air-e2e-peano build-check-air)
+add_dependencies(check-air-e2e-chess build-check-air)
 
 if(NOT TARGET check-all)
   add_custom_target(check-all)

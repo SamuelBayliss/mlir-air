@@ -38,7 +38,7 @@ transform::GetSegmentForOp::apply(transform::TransformRewriter &rewriter,
     }
     segments.insert(segment);
   }
-  results.set(getResult().cast<OpResult>(), segments.getArrayRef());
+  results.set(llvm::cast<OpResult>(getResult()), segments.getArrayRef());
   return DiagnosedSilenceableFailure::success();
 }
 
@@ -67,6 +67,8 @@ class AIRTransformDialectExtension
     : public transform::TransformDialectExtension<
           AIRTransformDialectExtension> {
 public:
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(AIRTransformDialectExtension)
+
   AIRTransformDialectExtension() {
     declareDependentDialect<func::FuncDialect>();
     registerTransformOps<

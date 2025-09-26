@@ -25,9 +25,16 @@ std::unique_ptr<mlir::Pass> createParallelToLaunchPass();
 std::unique_ptr<mlir::OperationPass<mlir::ModuleOp>>
 createParallelToLaunchPass(const ParallelToLaunchOptions &options);
 
+std::unique_ptr<mlir::Pass> createParallelToSegmentPass();
+std::unique_ptr<mlir::OperationPass<mlir::ModuleOp>>
+createParallelToSegmentPass(const ParallelToSegmentOptions &options);
+
 std::unique_ptr<mlir::Pass> createCopyToDmaPass();
-std::unique_ptr<mlir::Pass> createDmaToChannelPass();
 std::unique_ptr<mlir::Pass> createInsertEmptyLaunchOverHerdPass();
+
+std::unique_ptr<Pass> createAIRWrapFuncWithParallelPass();
+std::unique_ptr<mlir::Pass>
+createAIRWrapFuncWithParallelPass(AIRWrapFuncWithParallelPassOptions options);
 
 } // namespace air
 } // namespace xilinx

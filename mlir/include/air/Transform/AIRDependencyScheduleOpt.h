@@ -43,13 +43,7 @@ std::unique_ptr<mlir::Pass> createAIRLabelScfForLoopInAIRSegmentPattern();
 
 std::unique_ptr<mlir::Pass> createAIRSpecializeChannelWrapAndStridePattern();
 
-std::unique_ptr<mlir::Pass> createAIRDependencyScheduleOptPass();
-
 std::unique_ptr<mlir::Pass> createAIRUnrollChannelByFactorPattern();
-
-std::unique_ptr<mlir::Pass> createAIREnforceLoopCarriedMemrefDeallocPattern();
-
-std::unique_ptr<mlir::Pass> createAIRDeAliasMemref();
 
 std::unique_ptr<mlir::Pass> createAIRFuseChannels();
 std::unique_ptr<OperationPass<ModuleOp>>
@@ -57,12 +51,45 @@ createAIRFuseChannels(const AIRFuseChannelsOptions &);
 
 std::unique_ptr<mlir::Pass> createAIRIsolateAsyncDmaLoopNests();
 
-std::unique_ptr<mlir::Pass> createAIRSegmentLoopFusion();
+std::unique_ptr<mlir::Pass> createAIRLoopFusion();
+
+std::unique_ptr<mlir::Pass> createAIROptimizeShimDMABDs();
+std::unique_ptr<Pass>
+createAIROptimizeShimDMABDs(AIROptimizeShimDMABDsOptions options);
+
+std::unique_ptr<mlir::Pass> createAIROptimizeMemtileDMABDs();
+std::unique_ptr<Pass>
+createAIROptimizeMemtileDMABDs(AIROptimizeMemtileDMABDsOptions options);
+
+std::unique_ptr<mlir::Pass> createAIRFuseAllocDealloc();
+
+std::unique_ptr<mlir::Pass> createAIRShrinkMemrefSizesByAccess();
 
 // Populate patterns for canonicalizing index operations on loop index
 // variables. At the moment, only affine.apply computations on induction
 // variables are canonicalized
 void populateAIRLoopIndexCanonicalizationPatterns(RewritePatternSet &patterns);
+
+// Populate patterns for canonicalizing offsets, sizes and strides in air
+// channel_interface operations.
+void populateAIRCanonicalizeChannelWrapAndStridePatterns(
+    RewritePatternSet &patterns, int &maxSize, int &maxNumDims,
+    bool &enableRepeatAtHighestDim);
+
+// Apply AIRSpecializeChannelWrapAndStridePattern on region.
+void applyAIRSpecializeChannelWrapAndStridePattern(
+    Region *region, int maxNumDims, int maxSize, bool enableForLoopUnrolling,
+    bool enableRepeatAtHighestDim);
+
+// Populate patterns for fusing scf.for loops within air.launch.
+void populateAIRLoopFusionPattern(RewritePatternSet &patterns);
+
+// Apply AIRIsolateAsyncDmaLoopNestsPattern on region.
+void applyAIRIsolateAsyncDmaLoopNestsPattern(Region *region);
+
+// Populate patterns for fusing memref.alloc and dealloc ops into air.herarchy
+// ops.
+void populateAIRFuseAllocDeallocToAIRHierPatterns(RewritePatternSet &patterns);
 
 } // namespace air
 } // namespace xilinx

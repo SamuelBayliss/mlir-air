@@ -50,9 +50,6 @@
 #define DEBUG_TYPE "air-regularize-loop"
 
 using namespace mlir;
-using namespace mlir::affine;
-using namespace xilinx;
-using namespace xilinx::air;
 
 namespace {
 
@@ -72,6 +69,7 @@ public:
   void runOnAffineForNest(SmallVector<affine::AffineForOp, 6> &band);
 
   static const char *affineOptAttrName;
+
 private:
 };
 
@@ -81,7 +79,7 @@ static bool isIndependent(Operation *op, affine::AffineForOp forOp,
                           SmallPtrSetImpl<Operation *> &opsWithUsers,
                           SmallPtrSetImpl<Operation *> &opsToHoist);
 static bool
-checkInvarianceOfNestedIfOps(Operation *op, affine::AffineForOp forOp,
+checkInvarianceOfNestedIfOps(affine::AffineIfOp ifOp, affine::AffineForOp forOp,
                              SmallPtrSetImpl<Operation *> &opsWithUsers,
                              SmallPtrSetImpl<Operation *> &opsToHoist);
 static bool
@@ -95,8 +93,8 @@ bool isIndependent(Operation *op, affine::AffineForOp forOp,
                    SmallPtrSetImpl<Operation *> &opsWithUsers,
                    SmallPtrSetImpl<Operation *> &opsToHoist) {
   auto indVar = forOp.getInductionVar();
-  if (isa<affine::AffineIfOp>(op)) {
-    if (!checkInvarianceOfNestedIfOps(op, forOp, opsWithUsers, opsToHoist)) {
+  if (auto aif = dyn_cast<affine::AffineIfOp>(op)) {
+    if (!checkInvarianceOfNestedIfOps(aif, forOp, opsWithUsers, opsToHoist)) {
       return false;
     }
   } else if (auto forOp = dyn_cast<affine::AffineForOp>(op)) {
@@ -167,11 +165,10 @@ bool isIndependent(Operation *op, affine::AffineForOp forOp,
   return true;
 }
 
-bool checkInvarianceOfNestedIfOps(Operation *op, affine::AffineForOp forOp,
+bool checkInvarianceOfNestedIfOps(affine::AffineIfOp ifOp,
+                                  affine::AffineForOp forOp,
                                   SmallPtrSetImpl<Operation *> &opsWithUsers,
                                   SmallPtrSetImpl<Operation *> &opsToHoist) {
-  assert(isa<affine::AffineIfOp>(op));
-  auto ifOp = cast<affine::AffineIfOp>(op);
 
   if (!areAllOpsInTheBlockListInvariant(ifOp.getThenRegion(), forOp,
                                         opsWithUsers, opsToHoist)) {

@@ -24,8 +24,10 @@ def ParallelToHerd : Pass<"air-par-to-herd", "ModuleOp"> {
   }];
   let options = [
     Option<"clAssignDepth", "depth", "int",
-          /*default=*/"-1",
-          "Given a nest of parallel for loops, which depth to map to air.herd">,
+          /*default=*/"-2",
+          "Given a nest of parallel for loops, which depth to map to air.herd. "
+          "-1 means converting the innermost parallel loop; any other negative "
+          "value means converting all parallel loops">,
     Option<"clFirstDim", "first-dim", "int",
           /*default=*/"0",
           "Which herd dimension to map to first. Can be zero or one. If set to "
@@ -49,11 +51,31 @@ def ParallelToLaunch : Pass<"air-par-to-launch", "ModuleOp"> {
   }];
   let options = [
     Option<"clAssignDepth", "depth", "int",
-          /*default=*/"-1",
-          "Given a nest of parallel for loops, which depth to map to air.launch">,
+          /*default=*/"-2",
+          "Given a nest of parallel for loops, which depth to map to air.launch"
+          "-1 means converting the innermost parallel loop; any other negative "
+          "value means converting all parallel loops">,
     Option<"clHasSegment", "has-air-segment", "bool", /*default=*/"false",
            "Whether to create an air.segment op in generated air.launch "
            "regions">,
+  ];
+}
+
+def ParallelToSegment : Pass<"air-par-to-segment", "ModuleOp"> {
+  let summary = "Convert parallel loops to air.segment";
+  let constructor = "xilinx::air::createParallelToSegmentPass()";
+  let description =  [{
+    This pass converts parallel loop operations to air `segment` operations. The
+    iteration space of the parallel loops will be normalized and will become the
+    iteration space of the new `segment`. If nested parallel loops are present
+    then the `depth` option can to used to specify which loop depth to convert.
+  }];
+  let options = [
+    Option<"clAssignDepth", "depth", "int",
+          /*default=*/"-2",
+          "Given a nest of parallel for loops, which depth to map to air.segment"
+          "-1 means converting the innermost parallel loop; any other negative "
+          "value means converting all parallel loops">,
   ];
 }
 
@@ -63,88 +85,6 @@ def CopyToDma : Pass<"air-copy-to-dma", "ModuleOp"> {
   let description =  [{
     Converts memory operations to optimize data transfer through Direct Memory 
     Access (DMA) operations.
-  }];
-}
-
-def DmaToChannel : Pass<"air-dma-to-channel", "ModuleOp"> {
-  let summary = "Convert air.dma_memcpy_nd to air.channel";
-  let constructor = "xilinx::air::createDmaToChannelPass()";
-  let description =  [{
-    Transforms direct memory access (DMA) operations into channel-based 
-    communications, consisting of a series of channel put and get operations 
-    via shared channel constructs.
-
-    Example:
-
-    Input:
-    ```mlir
-    %0 = air.launch async [%async_token_0, %async_token_3, %async_token_6] (%arg0, %arg1) in (%arg2=%c4, %arg3=%c4) args(%arg4=%results_5, %arg5=%results, %arg6=%results_2) : memref<512x512xi32>, memref<512x1024xi32>, memref<1024x512xi32> attributes {id = 3 : i32} {
-      %1 = air.segment @segment_0 async  args(%arg7=%arg0, %arg8=%arg1, %arg9=%arg4, %arg10=%arg5, %arg11=%arg6) : index, index, memref<512x512xi32>, memref<512x1024xi32>, memref<1024x512xi32> attributes {id = 2 : i32} {
-        ...
-        %3 = scf.for %arg12 = %c0_8 to %c1024 step %c256 iter_args(%arg13 = %2) -> (!air.async.token) {
-          %8 = air.dma_memcpy_nd async [%arg13, %arg13] (%results_14[%c0_8, %arg12] [%c128, %c256] [%c1024, %c1], %arg10[%results_10, %arg12] [%c128, %c256] [%c1024, %c1]) {id = 1 : i32} : (memref<128x1024xi32, 1 : i32>, memref<512x1024xi32>)
-          ...
-        }
-        %6 = air.herd @herd_0 async [%async_token_13, %async_token_15, %async_token_17]  tile (%arg12, %arg13) in (%arg14=%c4_7, %arg15=%c4_7) args(%arg16=%results_14, %arg17=%results_16, %arg18=%results_18) : memref<128x1024xi32, 1 : i32>, memref<1024x128xi32, 1 : i32>, memref<128x128xi32, 1 : i32> attributes {id = 1 : i32} {
-          ...
-          %9 = scf.for %arg19 = %c0_23 to %c128_26 step %c4_24 iter_args(%arg20 = %8) -> (!air.async.token) {
-            ...
-            %16 = air.dma_memcpy_nd async [%async_token_37, %async_token_35, %arg20] (%results_38[%c0_23] [%c1024_22] [%c1_25], %arg16[%c0_44, %c0_43, %results_36] [%c4_24, %c32, %c8] [%c8, %c1024_22, %c1_25]) {broadcast_set = affine_set<()[s0, s1] : (s0 == 0, s1 >= 0, -s1 + 3 >= 0)>, id = 3 : i32} : (memref<4x8x4x8xi32, 2 : i32>, memref<128x1024xi32, 1 : i32>)
-            ...
-          }
-          ...
-          air.herd_terminator
-        }
-        ...
-        air.segment_terminator
-      }
-      air.launch_terminator
-    }
-    ```
-
-    Output:
-    ```mlir
-    ...
-    air.channel @channel_8 [1, 1]
-    ...
-    air.channel @channel_0 [1, 1] {broadcast_shape = [1, 4]}
-    ...
-    %0 = air.launch async [%async_token_0, %async_token_3, %async_token_6] (%arg0, %arg1) in (%arg2=%c4, %arg3=%c4) args(%arg4=%results_5, %arg5=%results, %arg6=%results_2) : memref<512x512xi32>, memref<512x1024xi32>, memref<1024x512xi32> attributes {id = 3 : i32} {
-      ...
-      %2 = scf.for %arg7 = %c0_7 to %c1024 step %c256 iter_args(%arg8 = %1) -> (!air.async.token) {
-        ...
-        %17 = air.channel.put async [%async_token_8, %arg8]  @channel_8[] (%arg5[%results_9, %arg7] [%c128, %c256] [%c1024, %c1]) : (memref<512x1024xi32>)
-        ...
-      }
-      ...
-      %16 = air.segment @segment_0 async  args(%arg7=%arg0, %arg8=%arg1, %arg9=%arg4, %arg10=%arg5, %arg11=%arg6) : index, index, memref<512x512xi32>, memref<512x1024xi32>, memref<1024x512xi32> attributes {id = 2 : i32} {
-        ...
-        %18 = scf.for %arg12 = %c0_32 to %c1024_33 step %c256_34 iter_args(%arg13 = %17) -> (!air.async.token) {
-          %49 = air.channel.get async [%arg13, %arg13]  @channel_8[] (%results_40[%c0_32, %arg12] [%c128_30, %c256_34] [%c1024_33, %c1_29]) : (memref<128x1024xi32, 1 : i32>)
-          ...
-        }
-        ...
-        %23 = scf.for %arg12 = %c0_47 to %c128_50 step %c4_48 iter_args(%arg13 = %22) -> (!air.async.token) {
-          ...
-          %49 = air.channel.put async [%async_token_160, %async_token_39, %arg13]  @channel_0[] (%results_40[%c0_163, %c0_162, %results_161] [%c4_48, %c32, %c8] [%c8, %c1024_46, %c1_49]) : (memref<128x1024xi32, 1 : i32>)
-          ...
-        }
-        ...
-        %47 = air.herd @herd_0 async [%async_token_39, %async_token_41, %async_token_43]  tile (%arg12, %arg13) in (%arg14=%c4_31, %arg15=%c4_31) args(%arg16=%results_40, %arg17=%results_42, %arg18=%results_44) : memref<128x1024xi32, 1 : i32>, memref<1024x128xi32, 1 : i32>, memref<128x128xi32, 1 : i32> attributes {id = 1 : i32} {
-          ...
-          %50 = scf.for %arg19 = %c0_155 to %c128_159 step %c4_156 iter_args(%arg20 = %49) -> (!air.async.token) {
-            ...
-            %57 = air.channel.get async [%async_token_170, %async_token_168, %arg20]  @channel_0[%arg12, %arg13] (%results_171[%c0_155] [%c1024_154] [%c1_158]) : (memref<4x8x4x8xi32, 2 : i32>)
-            ...
-          }
-          ...
-          air.herd_terminator
-        }
-        air.segment_terminator
-      }
-      air.launch_terminator
-    }
-    ```
   }];
 }
 
@@ -253,7 +193,19 @@ def AIRToAIE : Pass<"air-to-aie", "ModuleOp"> {
     Option<"clGenerateShimDMA", "generate-shim-dma", "bool",
            /*default=*/"false",
            "Choose whether to schedule shim data movement via generating AIE "
-           " shim DMA program, or AIR runtime.">,
+           "shim DMA program, or AIR runtime.">,
+    Option<"clInsertTracePacketFlow", "insert-trace-packet-flow", "bool", 
+          /*default=*/"false",
+          "Create packet routed traces for cores and memtiles">,
+    Option<"clUsePktFlowsAtShimDma", "use-pkt-flow-at-shim-dma", "bool", 
+          /*default=*/"false",
+          "Switch to using packet flows for all data movements at shim DMAs, "
+          "to enable time-multiplex sharing with control packet flows.">,
+    Option<"clUseLockRaceConditionFix", "use-lock-race-condition-fix", "bool", 
+          /*default=*/"false",
+          "Switch to enable a fix for lock race condition, which protects "
+          "against the risk of race condition, at the cost of inserting extra "
+          "dummy DMA BDs">,
   ];
   let description = [{
     This pass converts AIR dialect `herd` and `segment` operations into AIE
@@ -373,9 +325,9 @@ def AIRRtToLLVM : Pass<"airrt-to-llvm", "ModuleOp"> {
   let options = [];
 }
 
-def AIRRtToIpu : Pass<"airrt-to-ipu", "ModuleOp"> {
-  let summary = "Lower AIRRt dialect to AIEX.ipu dialect";
-  let constructor = "xilinx::airrt::createAIRRtToIpuPass()";
+def AIRRtToNpu : Pass<"airrt-to-npu", "ModuleOp"> {
+  let summary = "Lower AIRRt dialect to AIEX.npu dialect";
+  let constructor = "xilinx::airrt::createAIRRtToNpuPass()";
   let description =  [{
     Converts the runtime program, described in AIRRt dialect, into 
     instruction sequence specific to the SHIM DMA controllers on Ryzen AI 
@@ -386,7 +338,7 @@ def AIRRtToIpu : Pass<"airrt-to-ipu", "ModuleOp"> {
     Input:
     ```mlir
     module {
-      aie.device(ipu) {
+      aie.device(npu1_1col) {
         ...
         aie.shim_dma_allocation @airMemcpyId78(S2MM, 0, 0)
         memref.global "public" @airMemcpyId78 : memref<32x128xi32, 1>
@@ -420,7 +372,7 @@ def AIRRtToIpu : Pass<"airrt-to-ipu", "ModuleOp"> {
     Output:
     ```mlir
     module {
-      aie.device(ipu) {
+      aie.device(npu1_1col) {
         ...
         aie.shim_dma_allocation @airMemcpyId78(S2MM, 0, 0)
         memref.global "public" @airMemcpyId78 : memref<32x128xi32, 1>
@@ -433,17 +385,17 @@ def AIRRtToIpu : Pass<"airrt-to-ipu", "ModuleOp"> {
         ...
         func.func @matmul_512x512_1024xi32__dispatch_0_matmul_512x512x1024_i32() {
           ...
-          aiex.ipu.dma_memcpy_nd(0, 0, %arg0[0, 0, 0, 0][4, 4, 32, 256][0, 256, 1024]) {id = 0 : i64, metadata = @airMemcpyId19} : memref<512x1024xi32>
-          aiex.ipu.dma_memcpy_nd(0, 0, %arg0[0, 0, 128, 0][4, 4, 32, 256][0, 256, 1024]) {id = 1 : i64, metadata = @airMemcpyId19} : memref<512x1024xi32>
-          aiex.ipu.dma_memcpy_nd(0, 0, %arg0[0, 0, 256, 0][4, 4, 32, 256][0, 256, 1024]) {id = 2 : i64, metadata = @airMemcpyId19} : memref<512x1024xi32>
-          aiex.ipu.dma_memcpy_nd(0, 0, %arg0[0, 0, 384, 0][4, 4, 32, 256][0, 256, 1024]) {id = 3 : i64, metadata = @airMemcpyId19} : memref<512x1024xi32>
+          aiex.npu.dma_memcpy_nd(0, 0, %arg0[0, 0, 0, 0][4, 4, 32, 256][0, 256, 1024]) {id = 0 : i64, metadata = @airMemcpyId19} : memref<512x1024xi32>
+          aiex.npu.dma_memcpy_nd(0, 0, %arg0[0, 0, 128, 0][4, 4, 32, 256][0, 256, 1024]) {id = 1 : i64, metadata = @airMemcpyId19} : memref<512x1024xi32>
+          aiex.npu.dma_memcpy_nd(0, 0, %arg0[0, 0, 256, 0][4, 4, 32, 256][0, 256, 1024]) {id = 2 : i64, metadata = @airMemcpyId19} : memref<512x1024xi32>
+          aiex.npu.dma_memcpy_nd(0, 0, %arg0[0, 0, 384, 0][4, 4, 32, 256][0, 256, 1024]) {id = 3 : i64, metadata = @airMemcpyId19} : memref<512x1024xi32>
           ...
-          aiex.ipu.dma_memcpy_nd(0, 0, %arg1[0, 0, 0, 0][4, 2, 512, 32][128, 262144, 512]) {id = 0 : i64, metadata = @airMemcpyId15} : memref<1024x512xi32>
-          aiex.ipu.dma_memcpy_nd(0, 0, %arg1[0, 0, 0, 0][4, 2, 512, 32][128, 262144, 512]) {id = 1 : i64, metadata = @airMemcpyId15} : memref<1024x512xi32>
-          aiex.ipu.dma_memcpy_nd(0, 0, %arg1[0, 0, 0, 0][4, 2, 512, 32][128, 262144, 512]) {id = 2 : i64, metadata = @airMemcpyId15} : memref<1024x512xi32>
-          aiex.ipu.dma_memcpy_nd(0, 0, %arg1[0, 0, 0, 0][4, 2, 512, 32][128, 262144, 512]) {id = 3 : i64, metadata = @airMemcpyId15} : memref<1024x512xi32>
+          aiex.npu.dma_memcpy_nd(0, 0, %arg1[0, 0, 0, 0][4, 2, 512, 32][128, 262144, 512]) {id = 0 : i64, metadata = @airMemcpyId15} : memref<1024x512xi32>
+          aiex.npu.dma_memcpy_nd(0, 0, %arg1[0, 0, 0, 0][4, 2, 512, 32][128, 262144, 512]) {id = 1 : i64, metadata = @airMemcpyId15} : memref<1024x512xi32>
+          aiex.npu.dma_memcpy_nd(0, 0, %arg1[0, 0, 0, 0][4, 2, 512, 32][128, 262144, 512]) {id = 2 : i64, metadata = @airMemcpyId15} : memref<1024x512xi32>
+          aiex.npu.dma_memcpy_nd(0, 0, %arg1[0, 0, 0, 0][4, 2, 512, 32][128, 262144, 512]) {id = 3 : i64, metadata = @airMemcpyId15} : memref<1024x512xi32>
           ...
-          aiex.ipu.dma_memcpy_nd(0, 0, %arg2[0, 0, 0, 0][4, 4, 32, 128][65536, 128, 512]) {id = 8 : i64, metadata = @airMemcpyId78} : memref<512x512xi32>
+          aiex.npu.dma_memcpy_nd(0, 0, %arg2[0, 0, 0, 0][4, 4, 32, 128][65536, 128, 512]) {id = 8 : i64, metadata = @airMemcpyId78} : memref<512x512xi32>
           ...
           return
         }
@@ -452,7 +404,14 @@ def AIRRtToIpu : Pass<"airrt-to-ipu", "ModuleOp"> {
     ```
 
   }];
-  let options = [];
+  let options = [
+    Option<"clTraceSize", "trace-size", "unsigned",
+          /*default=*/"0",
+          "Trace buffer size for cores and memtiles (in bytes)">,
+    Option<"clTraceOffset", "trace-offset", "unsigned",
+          /*default=*/"0",
+          "Trace buffer offset appended to ddr_id=2">
+  ];
   let dependentDialects = ["xilinx::AIEX::AIEXDialect"];
 }
 
@@ -467,26 +426,36 @@ def AIRSplitDevices : Pass<"air-split-devices", "ModuleOp"> {
   ];
 }
 
-def AIRPipelineToAffine : Pass<"air-pipeline-to-affine", "ModuleOp"> {
-  let summary = "Lower air.pipeline stages to affine.if";
-  let constructor = "xilinx::air::createAIRPipelineToAffinePass()";
+def InsertEmptyLaunchOverHerd : Pass<"air-insert-launch-around-herd", "ModuleOp"> {
+  let summary = "Insert launch op (and optionally segment op) around herd op";
+  let constructor = "xilinx::air::createInsertEmptyLaunchOverHerdPass()";
   let description =  [{
-    Lower air.pipeline stages to affine.if
+    This pass inserts an air.launch over air.herd, where an air.launch 
+    is always inserted, and an air.segment is inserted only if 
+    insertSegment is set to true.
   }];
   let options = [
-    Option<"clLoweringType", "lowering-type", "std::string", 
-          /*default=*/"\"buffers\"",
-          "Type of lowering to use for core-to-core communication. Can be 'buffer' or 'getput'">
+    Option<"clInsertSegment", "insert-segment", "bool",
+          /*default=*/"false",
+           "Option to insert an air.segment around the herd. ">,
   ];
 }
 
-def InsertEmptyLaunchOverHerd : Pass<"air-insert-launch-and-segment-around-herd", "ModuleOp"> {
-  let summary = "Insert segment and launch ops around herd op";
-  let constructor = "xilinx::air::createInsertEmptyLaunchOverHerdPass()";
-  let description =  [{
-    This pass inserts launch and segment operations around herd op, if a herd op 
-    does not have a parent launch or segment operation.
+def AIRWrapFuncWithParallelPass : Pass<"air-wrap-func-with-parallel", "func::FuncOp"> {
+  let summary = "Wraps the body of a given func.func operation inside an scf.parallel loop.";
+  let constructor = "xilinx::air::createAIRWrapFuncWithParallelPass()";
+  let description = [{
+    Wraps the body of a given func.func operation inside an scf.parallel loop.
+    The pass assumes that: 
+    (1) The function arguments consist of: M memref arguments, N loop upper bounds, N loop induction variable indices.
+    (2) The scf.parallel loop is constructed using the N upper bounds and induction variable indices.
+    (3) The scf.parallel loop is inserted at the beginning of the function, wrapping all existing operations.
   }];
+  let options = [
+    ListOption<"clLoopBounds", "loop-bounds", "unsigned",
+               "Specify upper bounds for scf.parallel loops",
+               "llvm::cl::ZeroOrMore">,
+  ];
 }
 
 #endif

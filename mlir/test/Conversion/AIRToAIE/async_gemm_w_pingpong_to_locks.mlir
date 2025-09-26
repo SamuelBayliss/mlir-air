@@ -18,10 +18,10 @@
 // CHECK-COUNT-6:    aie.lock(%[[VAL_3]], {{.*}}) {init = 0 : i32}
 // CHECK-COUNT-6:    aie.lock(%[[VAL_4]], {{.*}}) {init = 0 : i32}
 // CHECK-COUNT-6:    aie.lock(%[[VAL_5]], {{.*}}) {init = 0 : i32}
-// CHECK-COUNT-5:    aie.buffer(%[[VAL_5]]) {sym_name = {{.*}}} : memref<32x32xi32, 2>
-// CHECK-COUNT-5:    aie.buffer(%[[VAL_4]]) {sym_name = {{.*}}} : memref<32x32xi32, 2>
-// CHECK-COUNT-5:    aie.buffer(%[[VAL_3]]) {sym_name = {{.*}}} : memref<32x32xi32, 2>
-// CHECK-COUNT-5:    aie.buffer(%[[VAL_2]]) {sym_name = {{.*}}} : memref<32x32xi32, 2>
+// CHECK-COUNT-5:    aie.buffer(%[[VAL_5]]) {{{.*}}} : memref<32x32xi32, 2>
+// CHECK-COUNT-5:    aie.buffer(%[[VAL_4]]) {{{.*}}} : memref<32x32xi32, 2>
+// CHECK-COUNT-5:    aie.buffer(%[[VAL_3]]) {{{.*}}} : memref<32x32xi32, 2>
+// CHECK-COUNT-5:    aie.buffer(%[[VAL_2]]) {{{.*}}} : memref<32x32xi32, 2>
 // CHECK:   aie.mem(%[[VAL_5]])
 // CHECK:   aie.core(%[[VAL_5]]) {
 // CHECK:     aie.use_lock({{.*}}, Acquire, 0)
@@ -38,8 +38,8 @@
 // CHECK:       aie.use_lock({{.*}}, Release, 0)
 // CHECK:       aie.use_lock({{.*}}, Release, 0)
 // CHECK:     }
-// CHECK:     aie.use_lock({{.*}}, Release, 1)
-// CHECK:     aie.use_lock({{.*}}, Release, 0)
+// CHECK-DAG: aie.use_lock({{.*}}, Release, 1)
+// CHECK-DAG: aie.use_lock({{.*}}, Release, 0)
 // CHECK:   } {elf_file = 
 // CHECK:   aie.mem(%[[VAL_4]])
 // CHECK:   aie.core(%[[VAL_4]])
@@ -57,8 +57,8 @@
 // CHECK:       aie.use_lock({{.*}}, Release, 0)
 // CHECK:       aie.use_lock({{.*}}, Release, 0)
 // CHECK:     }
-// CHECK:     aie.use_lock({{.*}}, Release, 1)
-// CHECK:     aie.use_lock({{.*}}, Release, 0)
+// CHECK-DAG: aie.use_lock({{.*}}, Release, 1)
+// CHECK-DAG: aie.use_lock({{.*}}, Release, 0)
 // CHECK:   } {elf_file = 
 // CHECK:   aie.mem(%[[VAL_3]])
 // CHECK:   aie.core(%[[VAL_3]])
@@ -76,8 +76,8 @@
 // CHECK:       aie.use_lock({{.*}}, Release, 0)
 // CHECK:       aie.use_lock({{.*}}, Release, 0)
 // CHECK:     }
-// CHECK:     aie.use_lock({{.*}}, Release, 1)
-// CHECK:     aie.use_lock({{.*}}, Release, 0)
+// CHECK-DAG: aie.use_lock({{.*}}, Release, 1)
+// CHECK-DAG: aie.use_lock({{.*}}, Release, 0)
 // CHECK:   } {elf_file = 
 // CHECK:   aie.mem(%[[VAL_2]])
 // CHECK:   aie.core(%[[VAL_2]])
@@ -95,8 +95,8 @@
 // CHECK:       aie.use_lock({{.*}}, Release, 0)
 // CHECK:       aie.use_lock({{.*}}, Release, 0)
 // CHECK:     }
-// CHECK:     aie.use_lock({{.*}}, Release, 1)
-// CHECK:     aie.use_lock({{.*}}, Release, 0)
+// CHECK-DAG: aie.use_lock({{.*}}, Release, 1)
+// CHECK-DAG: aie.use_lock({{.*}}, Release, 0)
 // CHECK:   } {elf_file = 
 
 #map = affine_map<()[s0] -> (s0 * 32)>
@@ -219,12 +219,6 @@ module {
         %async_token_15 = air.execute [%arg10, %16, %15] {
           linalg.matmul {cast = #linalg.type_fn<cast_signed>} ins(%results_11, %results_13 : memref<32x32xi32, 2>, memref<32x32xi32, 2>) outs(%results_5 : memref<32x32xi32, 2>)
         }
-        %async_token_16 = air.execute {
-          memref.dealloc %results_11 : memref<32x32xi32, 2>
-        }
-        %async_token_17 = air.execute {
-          memref.dealloc %results_13 : memref<32x32xi32, 2>
-        }
         %17 = affine.if #set()[%arg3, %arg4] -> !air.async.token {
           %20 = air.channel.get async [%16, %15, %arg9]  @channel_0[%arg3, %arg4] (%results_9[] [] []) {id = 8 : i32} : (memref<32x32xi32, 2>)
           affine.yield %20 : !air.async.token
@@ -242,12 +236,6 @@ module {
         %async_token_18 = air.execute [%async_token_15, %18, %17] {
           linalg.matmul {cast = #linalg.type_fn<cast_signed>} ins(%results_9, %results_7 : memref<32x32xi32, 2>, memref<32x32xi32, 2>) outs(%results_5 : memref<32x32xi32, 2>)
         }
-        %async_token_19 = air.execute {
-          memref.dealloc %results_9 : memref<32x32xi32, 2>
-        }
-        %async_token_20 = air.execute {
-          memref.dealloc %results_7 : memref<32x32xi32, 2>
-        }
         %19 = air.wait_all async [%17, %18] 
         scf.yield %async_token_15, %async_token_18, %async_token_18, %19 : !air.async.token, !air.async.token, !air.async.token, !air.async.token
       }
@@ -255,7 +243,12 @@ module {
       %async_token_14 = air.execute [%14] {
         memref.dealloc %results_5 : memref<32x32xi32, 2>
       }
-      air.herd_terminator
+      %async_token_19 = air.execute {
+        memref.dealloc %results_9 : memref<32x32xi32, 2>
+      }
+      %async_token_20 = air.execute {
+        memref.dealloc %results_7 : memref<32x32xi32, 2>
+      }
     }
     return
   }

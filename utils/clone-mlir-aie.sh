@@ -14,7 +14,22 @@
 #
 ##===----------------------------------------------------------------------===##
 
-export HASH=370781c0e5f7f887ef5089a4fe48d6c633a3431c
+export HASH=c921519ebb67f4e575df59dcf6cabab0c8ee7a1d
+DATETIME=2025090604
+WHEEL_VERSION=0.0.1.$DATETIME+${HASH:0:7}
+
+if [ x"$1" == x--get-wheel-version ]; then
+  echo $WHEEL_VERSION
+  exit 0
+fi
+
+MLIR_PYTHON_EXTRAS_SHORTHASH=ba2e6fe
+
+if [ x"$1" == x--get-mlir-python-extras-version ]; then
+  echo $MLIR_PYTHON_EXTRAS_SHORTHASH
+  exit 0
+fi
+
 target_dir=mlir-aie
 
 if [[ ! -d $target_dir ]]; then
@@ -25,6 +40,5 @@ pushd $target_dir
 git fetch --depth=1 origin $HASH
 git checkout $HASH
 git submodule update --init
-cd runtime_lib/xaiengine/aie-rt
-git checkout -b phoenix_v2023.2 origin/phoenix_v2023.2
+
 popd

@@ -26,7 +26,6 @@
 #include "mlir/IR/IntegerSet.h"
 #include "mlir/IR/MLIRContext.h"
 #include "mlir/Support/LogicalResult.h"
-#include "mlir/Support/MathExtras.h"
 #include "mlir/Transforms/RegionUtils.h"
 
 #include <algorithm>
@@ -179,8 +178,8 @@ public:
         c.op->emitOpError("has mismatching event type").attachNote()
             << "Has 'dma' as event type, but op isn't of type "
                "air::DmaMemcpyNdOp";
-      MemRefType srcTy = Op.getSrcMemref().getType().cast<MemRefType>();
-      MemRefType dstTy = Op.getDstMemref().getType().cast<MemRefType>();
+      MemRefType srcTy = llvm::cast<MemRefType>(Op.getSrcMemref().getType());
+      MemRefType dstTy = llvm::cast<MemRefType>(Op.getDstMemref().getType());
       auto srcSpace = srcTy.getMemorySpaceAsInt();
       auto dstSpace = dstTy.getMemorySpaceAsInt();
       // if there is a size mismatch, it's because we're moving a tile of the
@@ -196,12 +195,12 @@ public:
         c.op->emitOpError("has mismatching event type").attachNote()
             << "Has 'channel' as event type, but op isn't of type "
                "air::ChannelGetOp";
-      MemRefType dstTy = getOp.getDst().getType().cast<MemRefType>();
+      MemRefType dstTy = llvm::cast<MemRefType>(getOp.getDst().getType());
       std::vector<air::ChannelPutOp> putOps =
           air::getTheOtherChannelOpThroughSymbol(getOp);
       if (!putOps.size())
         getOp->emitOpError("found no put op for air::ChannelGetOp");
-      MemRefType srcTy = putOps[0].getSrc().getType().cast<MemRefType>();
+      MemRefType srcTy = llvm::cast<MemRefType>(putOps[0].getSrc().getType());
       auto srcSpace = srcTy.getMemorySpaceAsInt();
       auto dstSpace = dstTy.getMemorySpaceAsInt();
       auto srcVolumn = getTransferVolumn(putOps[0]);
@@ -219,7 +218,7 @@ public:
         c.op->emitOpError("has mismatching event type").attachNote()
             << "Has 'execute' as event type, but op isn't of type "
                "air::ExecuteOp";
-      auto child_op = &*(c.op->getRegions().front().getOps().begin());
+      auto child_op = &dyn_cast<air::ExecuteOp>(c.op).getChildOps().front();
       if (auto Op = mlir::dyn_cast<linalg::LinalgOp>(child_op)) {
         uint64_t compute_xfer_cost = 0;
         uint64_t compute_op_cost = getComputeCostFromCostModel(d, child_op);
@@ -366,7 +365,6 @@ public:
 
     // Walk the launch op and create a graph using dependencyCanonicalizer
     // intepreter
-    canonicalizer.removeDepListRepetition(toplevel);
     hostGraph = dependencyGraph(toplevel, true);
     canonicalizer.parseCommandGraphs(toplevel, hostGraph, dep_ctx,
                                      sim_granularity);
@@ -622,7 +620,7 @@ private:
   }
 
   uint64_t getTransferVolumn(air::ChannelInterface op) {
-    MemRefType memTy = op.getMemref().getType().cast<MemRefType>();
+    MemRefType memTy = llvm::cast<MemRefType>(op.getMemref().getType());
     if (op.getSizes().empty())
       return getTensorVolume(memTy);
     else
@@ -633,8 +631,8 @@ private:
     uint64_t output = 1;
     for (auto s : sizes) {
       auto op = s.getDefiningOp();
-      if (op && isa<arith::ConstantIndexOp>(op)) {
-        output *= dyn_cast<arith::ConstantIndexOp>(op).value();
+      if (auto cIOp = dyn_cast_if_present<arith::ConstantIndexOp>(op)) {
+        output *= cIOp.value();
       } else if (op)
         op->emitOpError("non-static shape for data movement");
     }
@@ -816,7 +814,8 @@ unsigned lookUpMemorySpaceIntFromString(std::string memory_space) {
   return output;
 }
 
-template <typename T> void push_back_if_unique(std::vector<T> &vec, T entry) {
+template <typename T>
+void push_back_if_unique(std::vector<T> &vec, T entry) {
   if (std::find(vec.begin(), vec.end(), entry) == vec.end()) {
     vec.push_back(entry);
   }

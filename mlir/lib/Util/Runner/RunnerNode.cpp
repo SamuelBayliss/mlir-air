@@ -326,8 +326,8 @@ public:
       return (bool)this->checkResourceFulfillmentForOp(Op);
     } else if (auto Op = dyn_cast<air::ChannelGetOp>(op)) {
       return (bool)this->checkResourceFulfillmentForOp(Op);
-    } else if (isa<air::ExecuteOp>(op)) {
-      auto child_op = &*(op->getRegions().front().getOps().begin());
+    } else if (auto Op = dyn_cast<air::ExecuteOp>(op)) {
+      auto child_op = &Op.getChildOps().front();
       if (name == "AllocOp") {
         auto Op = dyn_cast<memref::AllocOp>(child_op);
         return this->checkResourceFulfillmentForOp(Op);
@@ -509,15 +509,10 @@ private:
     // Get the size of segment in tiles
     auto num_rows = op.getNumRows();
     auto num_cols = op.getNumCols();
-    if (num_rows) {
-      if (num_cols) {
-        usage_count *= mlir::ceilDiv(*num_rows, du_size_x);
-        usage_count *= mlir::ceilDiv(*num_cols, du_size_y);
-        return usage_count;
-      } else {
-        op->emitOpError("Segment has no placed AIE cores");
-        return 0;
-      }
+    if (num_rows && num_cols) {
+      usage_count *= llvm::divideCeil(*num_rows, du_size_x);
+      usage_count *= llvm::divideCeil(*num_cols, du_size_y);
+      return usage_count;
     } else {
       op->emitOpError("Segment has no placed AIE cores");
       return 0;
@@ -655,7 +650,7 @@ private:
     std::vector<resource *> resource_pool;
     double memory_pool = this->getMemoriesPool(resource_pool);
     // Get memory allocation size
-    MemRefType ty = Op.getMemref().getType().cast<MemRefType>();
+    MemRefType ty = llvm::cast<MemRefType>(Op.getMemref().getType());
     double memory_allocated = this->getMemoryCostInBytes(ty, Op.getOperation());
     if (memory_allocated <= memory_pool) {
       return true;
@@ -667,7 +662,7 @@ private:
     std::vector<resource *> resource_pool;
     double memory_pool = this->getMemoriesPool(resource_pool, false);
     // Get memory allocation size
-    MemRefType ty = Op.getMemref().getType().cast<MemRefType>();
+    MemRefType ty = llvm::cast<MemRefType>(Op.getMemref().getType());
     double memory_deallocated =
         this->getMemoryCostInBytes(ty, Op.getOperation());
     if (memory_deallocated <= memory_pool) {
@@ -719,8 +714,8 @@ private:
                                 Operation *op = nullptr,
                                 std::string name = "") {
     if (op) {
-      if (isa<air::ExecuteOp>(op)) {
-        auto child_op = &*(op->getRegions().front().getOps().begin());
+      if (auto exec_op = dyn_cast<air::ExecuteOp>(op)) {
+        auto child_op = &exec_op.getChildOps().front();
         // Memory allocation/deallocation
         if (name == "AllocOp") {
           auto Op = dyn_cast<memref::AllocOp>(child_op);
@@ -781,7 +776,7 @@ private:
     std::vector<resource *> resource_pool;
     this->getMemoriesPool(resource_pool);
     // Get memory size in bytes
-    MemRefType ty = Op.getMemref().getType().cast<MemRefType>();
+    MemRefType ty = llvm::cast<MemRefType>(Op.getMemref().getType());
     double memory_allocated = this->getMemoryCostInBytes(ty, Op.getOperation());
     // Reserve resource
     this->allocateRunnerNodeToAllocateMemory(resource_pool, reserved_resources,
@@ -793,7 +788,7 @@ private:
     std::vector<resource *> resource_pool;
     this->getMemoriesPool(resource_pool, false);
     // Get memory size in bytes
-    MemRefType ty = Op.getMemref().getType().cast<MemRefType>();
+    MemRefType ty = llvm::cast<MemRefType>(Op.getMemref().getType());
     double memory_deallocated =
         this->getMemoryCostInBytes(ty, Op.getOperation());
     // Reserve resource
@@ -1195,7 +1190,8 @@ private:
     unsigned put_to_deallocate = 0;
     unsigned get_to_deallocate = 0;
     if (put_reserved_count * bcast_factor > get_reserved_count) {
-      put_to_deallocate = mlir::floorDiv(get_reserved_count, bcast_factor);
+      put_to_deallocate =
+          llvm::divideFloorSigned(get_reserved_count, (int)bcast_factor);
     } else {
       put_to_deallocate = put_reserved_count;
     }
@@ -1512,8 +1508,8 @@ private:
                              .getDefiningOp<arith::ConstantIndexOp>();
           auto stepCstOp =
               scf_par.getStep()[i].getDefiningOp<arith::ConstantIndexOp>();
-          int64_t tripCount = mlir::ceilDiv(ubCstOp.value() - lbCstOp.value(),
-                                            stepCstOp.value());
+          int64_t tripCount = llvm::divideCeilSigned(
+              ubCstOp.value() - lbCstOp.value(), stepCstOp.value());
           output *= tripCount;
         }
       } else if (auto hier = dyn_cast<air::HierarchyInterface>(parent)) {
@@ -1577,8 +1573,8 @@ private:
                              .getDefiningOp<arith::ConstantIndexOp>();
           auto stepCstOp =
               scf_par.getStep()[i].getDefiningOp<arith::ConstantIndexOp>();
-          int64_t tripCount = mlir::ceilDiv(ubCstOp.value() - lbCstOp.value(),
-                                            stepCstOp.value());
+          int64_t tripCount = llvm::divideCeilSigned(
+              ubCstOp.value() - lbCstOp.value(), stepCstOp.value());
           output *= tripCount;
         }
       } else if (auto hier = dyn_cast<air::HierarchyInterface>(parent)) {
@@ -1626,8 +1622,8 @@ private:
                              .getDefiningOp<arith::ConstantIndexOp>();
           auto stepCstOp =
               scf_par.getStep()[i].getDefiningOp<arith::ConstantIndexOp>();
-          int64_t tripCount = mlir::ceilDiv(ubCstOp.value() - lbCstOp.value(),
-                                            stepCstOp.value());
+          int64_t tripCount = llvm::divideCeilSigned(
+              ubCstOp.value() - lbCstOp.value(), stepCstOp.value());
           output *= tripCount;
         }
       } else if (isa<air::HierarchyInterface>(parent) &&
@@ -1670,35 +1666,10 @@ private:
   unsigned getSizeThroughAffineIf(Operation *op, Operation *spatial_loop,
                                   std::vector<Operation *> affine_if_nest) {
     unsigned output = 1;
-    SmallVector<int, 2> lbs_spatial;
-    SmallVector<int, 2> ubs_spatial;
-    getSizesFromSpatialLoop(spatial_loop, lbs_spatial, ubs_spatial);
-
-    // Walk through affine.if nest (in reverse order through vector)
-    for (auto it = affine_if_nest.rbegin(); it != affine_if_nest.rend(); ++it) {
-      auto affine_if = dyn_cast<affine::AffineIfOp>(*it);
-      // Get then integerset sizes
-      SmallVector<int, 2> lbs_int = {0, 0};
-      SmallVector<int, 2> ubs_int = {0, 0};
-      IntegerSet int_set = affine_if.getIntegerSet();
-      getSizesFromIntegerSet(affine_if->getContext(), int_set, lbs_int,
-                             ubs_int);
-      // If found then block containing op
-      if (affine_if.getThenBlock()->findAncestorOpInBlock(*op)) {
-        for (unsigned i = 0; i < lbs_int.size(); i++) {
-          output *= ubs_int[i] - lbs_int[i] + 1;
-        }
-        return output;
-      }
-      // Else keep going, while updating the spatial sizes wrt else condition
-      else {
-        getElseSizesFromAffineIf(lbs_spatial, ubs_spatial, lbs_int, ubs_int);
-      }
-    }
-    // If op isn't in any then blocks in affine.if nest
-    for (unsigned i = 0; i < lbs_spatial.size(); i++) {
-      output *= ubs_spatial[i] - lbs_spatial[i] + 1;
-    }
+    auto conditionBounds = air::getRectangularConditionBoundsThroughAffineIfs(
+        op, spatial_loop, affine_if_nest);
+    for (auto [lbs_int, ubs_int] : conditionBounds)
+      output *= ubs_int - lbs_int + 1;
     return output;
   }
 

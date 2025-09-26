@@ -7,19 +7,17 @@
 import abc
 from typing import TypeVar
 
-import torch
-
-from air.mlir.ir import Module
+from air.ir import Module
 
 # A type shared between the result of `AirBackend.compile` and the
 # input to `AirBackend.load`. Each backend will likely have a
 # different definition of this type.
-CompiledArtifact = TypeVar('CompiledArtifact')
+CompiledArtifact = TypeVar("CompiledArtifact")
 
 # A wrapper around a backend-specific loaded program representation
 # that uniformly translates the `x.method(...)` interface expected of
 # Torch modules into appropriate lower-level operations.
-Invoker = TypeVar('Invoker')
+Invoker = TypeVar("Invoker")
 
 
 class AirBackend(abc.ABC):
@@ -28,6 +26,7 @@ class AirBackend(abc.ABC):
     Backends are recommended to raise meaningful exceptions in case of error,
     ideally with easy reproduction instructions.
     """
+
     @abc.abstractmethod
     def compile(self, module: Module) -> CompiledArtifact:
         """Compile the provided MLIR module into a compiled artifact.
@@ -48,3 +47,15 @@ class AirBackend(abc.ABC):
         See the description of `Invoker` for the requirements on the returned
         type.
         """
+
+
+class AirBackendError(Exception):
+    """An exception thrown by AIR backends"""
+
+    def __init__(self, message):
+        """
+        Constructor for the AirBackendError
+        Args:
+            message: the reason for the exception
+        """
+        super().__init__(message)

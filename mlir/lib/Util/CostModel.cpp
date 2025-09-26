@@ -30,7 +30,6 @@ using namespace mlir;
 namespace xilinx {
 namespace air {
 
-
 static uint64_t getTensorVolume(const ShapedType ty) {
 
   if (!ty.hasRank())
@@ -39,21 +38,18 @@ static uint64_t getTensorVolume(const ShapedType ty) {
   uint64_t volume = 1;
   for (auto &d : ty.getShape())
     volume *= d;
-  return volume * (ty.getElementTypeBitWidth()/8);
+  return volume * (ty.getElementTypeBitWidth() / 8);
 }
 
 static uint64_t getTensorVolume(const Type ty) {
-  if (auto t = ty.dyn_cast<ShapedType>()) {
+  if (auto t = llvm::dyn_cast<ShapedType>(ty)) {
     return getTensorVolume(t);
-  }
-  else {
+  } else {
     return 1;
   }
 }
 
-
-void
-CostModel::getLinalgOpCounts(OpCountMap &map, linalg::LinalgOp op) {
+void CostModel::getLinalgOpCounts(OpCountMap &map, linalg::LinalgOp op) {
   OpBuilder b(op);
   auto loc = op.getLoc();
 
@@ -63,14 +59,14 @@ CostModel::getLinalgOpCounts(OpCountMap &map, linalg::LinalgOp op) {
     return;
 
   SmallVector<OpFoldResult> shapeSizes =
-      affine::makeComposedFoldedMultiResultAffineApply(
+      mlir::affine::makeComposedFoldedMultiResultAffineApply(
           b, loc, shapeSizesToLoopsMap, allShapeSizes);
   int64_t iters = 1;
   int64_t reads = 0;
   int64_t writes = 0;
   uint64_t footprint = 0;
   for (auto size : shapeSizes) {
-    if (auto v = size.dyn_cast<Value>()) {
+    if (auto v = llvm::dyn_cast<Value>(size)) {
       auto c = dyn_cast<arith::ConstantIndexOp>(v.getDefiningOp());
       if (!c) {
         LLVM_DEBUG(llvm::outs() << "Found non-constant dim!\n");
@@ -78,8 +74,8 @@ CostModel::getLinalgOpCounts(OpCountMap &map, linalg::LinalgOp op) {
       }
       iters *= c.value();
     } else {
-      auto a = size.dyn_cast<Attribute>();
-      auto c = a.dyn_cast<IntegerAttr>();
+      auto a = llvm::dyn_cast<Attribute>(size);
+      auto c = llvm::dyn_cast<IntegerAttr>(a);
       if (!c) {
         LLVM_DEBUG(llvm::outs() << "unhandled addr!\n");
         return;
@@ -119,9 +115,7 @@ CostModel::getLinalgOpCounts(OpCountMap &map, linalg::LinalgOp op) {
   return;
 }
 
-void
-CostModel::getScfForOpCounts(CostModel::OpCountMap &map, scf::ForOp op)
-{
+void CostModel::getScfForOpCounts(CostModel::OpCountMap &map, scf::ForOp op) {
   // everything must be a constant
   auto step = op.getStep();
   if (!step.getDefiningOp<arith::ConstantIndexOp>())
@@ -136,8 +130,10 @@ CostModel::getScfForOpCounts(CostModel::OpCountMap &map, scf::ForOp op)
     return;
 
   auto stepI64 = cast<arith::ConstantIndexOp>(step.getDefiningOp()).value();
-  auto lowerBoundI64 = cast<arith::ConstantIndexOp>(lowerBound.getDefiningOp()).value();
-  auto upperBoundI64 = cast<arith::ConstantIndexOp>(upperBound.getDefiningOp()).value();
+  auto lowerBoundI64 =
+      cast<arith::ConstantIndexOp>(lowerBound.getDefiningOp()).value();
+  auto upperBoundI64 =
+      cast<arith::ConstantIndexOp>(upperBound.getDefiningOp()).value();
 
   auto iters = (upperBoundI64 - lowerBoundI64) / stepI64;
 
@@ -153,27 +149,21 @@ CostModel::getScfForOpCounts(CostModel::OpCountMap &map, scf::ForOp op)
   return;
 }
 
-CostModel::OpCountMap
-CostModel::getOpCounts(Operation* op)
-{
+CostModel::OpCountMap CostModel::getOpCounts(Operation *op) {
   OpCountMap map;
   map.name = op->getName().getStringRef().str();
-  llvm::TypeSwitch<Operation*>(op)
-      .Case<linalg::LinalgOp>([&](linalg::LinalgOp o){
-        getLinalgOpCounts(map, o);
-      })
-      .Case<scf::ForOp>([&](scf::ForOp o){
-        getScfForOpCounts(map, o);
-      })
-      .Default([&](Operation *op){
-        return map;//map.insert({"unknown", 1});
+  llvm::TypeSwitch<Operation *>(op)
+      .Case<linalg::LinalgOp>(
+          [&](linalg::LinalgOp o) { getLinalgOpCounts(map, o); })
+      .Case<scf::ForOp>([&](scf::ForOp o) { getScfForOpCounts(map, o); })
+      .Default([&](Operation *op) {
+        return map; // map.insert({"unknown", 1});
       });
   return map;
 }
 
-void
-CostModel::opCountToJSON(OpCountMap &opCounts,
-                         llvm::json::Object &parent) {
+void CostModel::opCountToJSON(OpCountMap &opCounts,
+                              llvm::json::Object &parent) {
   llvm::json::Object layerStatsJSON;
   for (auto p : opCounts.map) {
     auto name = p.first;
@@ -187,8 +177,7 @@ CostModel::opCountToJSON(OpCountMap &opCounts,
       llvm::json::Value(std::move(layerStatsJSON));
 }
 
-std::string
-CostModel::opCountsToJSON(ModuleOp module) {
+std::string CostModel::opCountsToJSON(ModuleOp module) {
   llvm::json::Object top;
 
   module.walk([&](func::FuncOp fop) {

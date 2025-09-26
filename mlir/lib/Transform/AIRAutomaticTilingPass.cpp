@@ -41,11 +41,9 @@
 #define DEBUG_TYPE "air-automatic-tiling"
 
 using namespace mlir;
-using namespace mlir::affine;
-using namespace xilinx;
-using namespace xilinx::air;
 
-namespace {
+namespace xilinx {
+namespace air {
 
 class AIRAutomaticTilingPass
     : public xilinx::air::impl::AIRAutomaticTilingBase<AIRAutomaticTilingPass> {
@@ -175,11 +173,12 @@ constructTiledLoopNest(MutableArrayRef<affine::AffineForOp> origLoops,
                                                   std::prev(ops.end()));
 
   // Manage the tiled loop bounds and step sizes.
-  assert(!origLoops.empty());
   OpBuilder b(origLoops[0].getOperation());
-  // unsigned width = origLoops.size();
   unsigned width = setOfPrimeFactors.size();
-  assert(origLoops.size() == width);
+  if (origLoops.size() != width) {
+    origLoops[0]->emitOpError("origLoops.size() != setOfPrimeFactors.size()");
+    return;
+  }
 
   static unsigned forOpLevel = 0;
   for (unsigned i = 0; i < width; i++) {
@@ -251,7 +250,10 @@ void AIRAutomaticTilingPass::tileLoopsAutomatically(
     SmallVector<SmallVector<int64_t, 6>, 3> setOfPrimeFactors;
     for (auto forOp : origLoops) {
       int64_t upperLoopBound = forOp.getConstantUpperBound();
-      assert(upperLoopBound > 1);
+      if (upperLoopBound <= 1) {
+        forOp->emitOpError("upperLoopBound <= 1");
+        return;
+      }
 
       SmallVector<int64_t, 6> primeFactors;
       factorConstant(upperLoopBound, primeFactors);
@@ -314,8 +316,6 @@ void AIRAutomaticTilingPass::tileLoopsManually(
 
     auto stringAttr = band[0]->getAttrOfType<StringAttr>(
         AIRAutomaticTilingPass::affineOptAttrName);
-    // StringRef originalLabel = band[0]->getAttrOfType<StringRef>(
-    //   AIRAutomaticTilingPass::affineOptAttrName);
     if (stringAttr) {
       StringAttr postLabel =
           clPostLabel.empty()
@@ -327,7 +327,8 @@ void AIRAutomaticTilingPass::tileLoopsManually(
   }
 }
 
-} // anonymous namespace
+} // namespace air
+} // namespace xilinx
 
 namespace xilinx {
 namespace air {

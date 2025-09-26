@@ -99,11 +99,11 @@ endif()
 include_directories(${LLVM_INCLUDE_DIRS})
 include_directories(${MLIR_INCLUDE_DIRS})
 
-link_directories(${AIE_BINARY_DIR}/lib)
-include_directories(${AIE_INCLUDE_DIRS})
-
 include_directories(${PROJECT_SOURCE_DIR}/mlir/include)
 include_directories(${PROJECT_BINARY_DIR}/mlir/include)
+
+link_directories(${AIE_BINARY_DIR}/lib)
+include_directories(${AIE_INCLUDE_DIRS})
 
 add_definitions(${LLVM_DEFINITIONS})
 
@@ -132,6 +132,11 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU" AND CMAKE_CXX_COMPILER_VERSION VERSION_LE
 endif()
 
 add_custom_target(check-all)
+
+# Make sure we generate the headers
+add_custom_target(air-headers)
+set_target_properties(air-headers PROPERTIES FOLDER "Misc")
+add_dependencies(air-headers mlir-headers)
 
 # Make sure we build the docs
 add_custom_target(docs ALL)
@@ -167,7 +172,7 @@ foreach(target ${AIR_RUNTIME_TARGETS})
     air_runtime_lib_${target}
     PREFIX ${CMAKE_CURRENT_BINARY_DIR}/runtime_libTmp/${target}
     SOURCE_DIR ${PROJECT_SOURCE_DIR}/runtime_lib
-    BINARY_DIR ${CMAKE_CURRENT_BINARY_DIR}/runtime_lib/${target}
+    BINARY_DIR ${CMAKE_CURRENT_BINARY_DIR}/runtime_lib
     CMAKE_CACHE_ARGS -DCMAKE_MODULE_PATH:STRING=${CMAKE_MODULE_PATH}
     CMAKE_ARGS -DCMAKE_TOOLCHAIN_FILE=${${target}_TOOLCHAIN_FILE}
                -DCMAKE_C_COMPILER=${CMAKE_C_COMPILER}
@@ -178,6 +183,7 @@ foreach(target ${AIR_RUNTIME_TARGETS})
                -DLibXAIE_ROOT=${LibXAIE_ROOT}
                -Dhsa-runtime64_DIR=${hsa-runtime64_DIR}
                -Dhsakmt_DIR=${hsakmt_DIR}
+               -DAIR_RUNTIME_TARGET=${target}
                -DAIE_DIR=${AIE_DIR}
     BUILD_ALWAYS true
     STEP_TARGETS clean build install test
@@ -204,3 +210,4 @@ endif()
 add_subdirectory(tools)
 add_subdirectory(mlir)
 add_subdirectory(cmake/modules)
+add_subdirectory(programming_examples)

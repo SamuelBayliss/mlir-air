@@ -6,7 +6,8 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "air/Conversion/AIRPipeline.h"
+#include "air/Conversion/PassDetail.h"
+
 #include "air/Dialect/AIR/AIRDialect.h"
 #include "air/Dialect/AIRRt/AIRRtDialect.h"
 #include "air/Dialect/AIRRt/AIRRtOps.h"
@@ -39,11 +40,9 @@
 #define DEBUG_TYPE "air-to-cpu"
 
 using namespace mlir;
-using namespace mlir::arith;
-using namespace xilinx;
-using namespace xilinx::air;
 
-namespace {
+namespace xilinx {
+namespace air {
 
 class AIRHerdOpConversion : public ConversionPattern {
 public:
@@ -123,24 +122,6 @@ public:
   }
 };
 
-class AIRPipelineConversion : public ConversionPattern {
-public:
-  explicit AIRPipelineConversion(MLIRContext *context)
-      : ConversionPattern(air::HerdPipelineOp::getOperationName(), 1, context) {
-  }
-
-  LogicalResult
-  matchAndRewrite(Operation *op, ArrayRef<Value> operands,
-                  ConversionPatternRewriter &rewriter) const override {
-    auto pipeOp = cast<air::HerdPipelineOp>(op);
-    Block &bb = pipeOp.getBody().front();
-    rewriter.eraseOp(pipeOp.getBody().back().getTerminator());
-    bb.getOperations().splice(Block::iterator(op), bb.getOperations());
-    rewriter.eraseOp(op);
-    return success();
-  }
-};
-
 static func::CallOp convertOpToFunction(Operation *op, ArrayRef<Value> operands,
                                         ConversionPatternRewriter &rewriter,
                                         StringRef fnName) {
@@ -151,14 +132,14 @@ static func::CallOp convertOpToFunction(Operation *op, ArrayRef<Value> operands,
   SmallVector<Value, 4> dependencies;
   for (auto o : operands) {
     // erase the size to reduce the number of manglings
-    if (auto memrefTy = o.getType().dyn_cast<MemRefType>()) {
+    if (auto memrefTy = llvm::dyn_cast<MemRefType>(o.getType())) {
       auto t = MemRefType::get(
           std::vector<int64_t>(memrefTy.getRank(), ShapedType::kDynamic),
           memrefTy.getElementType(), memrefTy.getLayout(),
           /*memrefTy.getMemorySpace()*/ 0);
       callops.push_back(
           rewriter.create<UnrealizedConversionCastOp>(loc, t, o).getResult(0));
-    } else if (o.getType().isa<async::TokenType>()) {
+    } else if (llvm::isa<async::TokenType>(o.getType())) {
       dependencies.push_back(o);
     } else {
       callops.push_back(o);
@@ -168,14 +149,14 @@ static func::CallOp convertOpToFunction(Operation *op, ArrayRef<Value> operands,
   SmallVector<MemRefType, 16> real_result_tys;
   SmallVector<Type, 1> token_result_tys;
   for (auto t : op->getResultTypes()) {
-    if (auto memrefTy = t.dyn_cast<MemRefType>()) {
+    if (auto memrefTy = llvm::dyn_cast<MemRefType>(t)) {
       auto mrt = MemRefType::get(
           std::vector<int64_t>(memrefTy.getRank(), ShapedType::kDynamic),
           memrefTy.getElementType(), memrefTy.getLayout(),
           /*memrefTy.getMemorySpace()*/ 0);
       retTys.push_back(mrt);
       real_result_tys.push_back(memrefTy);
-    } else if (t.isa<air::AsyncTokenType>()) {
+    } else if (llvm::isa<air::AsyncTokenType>(t)) {
       token_result_tys.push_back(t);
     } else {
       retTys.push_back(t);
@@ -204,7 +185,7 @@ static func::CallOp convertOpToFunction(Operation *op, ArrayRef<Value> operands,
     results = call.getResults();
     for (unsigned i = 0, real_result_idx = 0; i < results.size(); ++i) {
       auto r = results[i];
-      if (auto memrefTy = r.getType().dyn_cast<MemRefType>()) {
+      if (auto memrefTy = llvm::dyn_cast<MemRefType>(r.getType())) {
         auto t = real_result_tys[real_result_idx++];
         auto c =
             rewriter.create<UnrealizedConversionCastOp>(op->getLoc(), t, r);
@@ -320,7 +301,7 @@ public:
   matchAndRewrite(memref::DeallocOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
 
-    auto memrefTy = op.getMemref().getType().cast<MemRefType>();
+    auto memrefTy = llvm::cast<MemRefType>(op.getMemref().getType());
     if (memrefTy.getMemorySpaceAsInt() == (int)air::MemorySpace::L3)
       return failure();
 
@@ -341,7 +322,7 @@ public:
 
     SmallVector<Type, 2> retTy;
     for (auto t : op.getResultTypes())
-      if (t.isa<air::AsyncTokenType>())
+      if (llvm::isa<air::AsyncTokenType>(t))
         retTy.push_back(async::TokenType::get(op->getContext()));
       else
         retTy.push_back(t);
@@ -382,7 +363,7 @@ public:
 
     for (auto o : operands) {
       Value v = o;
-      // if (o.getType().isa<air::AsyncTokenType>())
+      // if (llvm::isa<air::AsyncTokenType>(o.getType()))
       //   v = rewriter.create<UnrealizedConversionCastOp>(op->getLoc(),
       //                   async::TokenType::get(op->getContext()),
       //                   o).getResult(0);
@@ -403,7 +384,7 @@ public:
     SmallVector<Value, 8> operands{adaptor.getOperands()};
     SmallVector<Type, 2> retTys;
     for (auto t : op->getResultTypes()) {
-      if (t.isa<air::AsyncTokenType>()) {
+      if (llvm::isa<air::AsyncTokenType>(t)) {
         retTys.push_back(async::TokenType::get(op->getContext()));
       } else {
         retTys.push_back(t);
@@ -596,7 +577,7 @@ struct ChannelOpConversion : public OpConversionPattern<air::ChannelOp> {
 
     SmallVector<int64_t, 2> shape;
     for (auto i : op.getSize()) {
-      shape.push_back(i.dyn_cast<IntegerAttr>().getInt());
+      shape.push_back(llvm::dyn_cast<IntegerAttr>(i).getInt());
     }
     // if channel dim < 2, add until dim = 2
     while (shape.size() < 2) {
@@ -678,9 +659,10 @@ public:
     }
     // if channel is broadcast, add broadcast shape
     if (channelOp->getAttr("broadcast_shape")) {
-      for (auto i : channelOp->getAttr("broadcast_shape").cast<ArrayAttr>()) {
+      for (auto i :
+           llvm::cast<ArrayAttr>(channelOp->getAttr("broadcast_shape"))) {
         operands.push_back(rewriter.create<arith::ConstantIndexOp>(
-            op->getLoc(), i.cast<IntegerAttr>().getInt()));
+            op->getLoc(), llvm::cast<IntegerAttr>(i).getInt()));
       }
     } else {
       // if channel is not broadcast, add 1
@@ -717,18 +699,18 @@ public:
     TypeConverter converter;
     converter.addConversion([&](Type type) -> std::optional<Type> {
       // convert air::AsyncTokenType to async::TokenType
-      if (auto t = type.dyn_cast<air::AsyncTokenType>())
+      if (auto t = llvm::dyn_cast<air::AsyncTokenType>(type))
         return async::TokenType::get(context);
-      if (auto t = type.dyn_cast<MemRefType>())
+      if (auto t = llvm::dyn_cast<MemRefType>(type))
         if (t.getMemorySpaceAsInt() != 0)
           return MemRefType::get(t.getShape(), t.getElementType(),
                                  t.getLayout(), 0);
       return type;
     });
     auto addUnrealizedCast = [](OpBuilder &builder, Type type,
-                                ValueRange inputs, Location loc) {
+                                ValueRange inputs, Location loc) -> Value {
       auto cast = builder.create<UnrealizedConversionCastOp>(loc, type, inputs);
-      return std::optional<Value>(cast.getResult(0));
+      return cast.getResult(0);
     };
     converter.addSourceMaterialization(addUnrealizedCast);
     converter.addTargetMaterialization(addUnrealizedCast);
@@ -768,9 +750,9 @@ public:
 
     target.addDynamicallyLegalOp<func::CallOp>([&](func::CallOp op) {
       auto isIllegal = [](Type t) {
-        if (t.isa<air::AsyncTokenType>())
+        if (llvm::isa<air::AsyncTokenType>(t))
           return true;
-        if (auto mt = t.dyn_cast<MemRefType>())
+        if (auto mt = llvm::dyn_cast<MemRefType>(t))
           return mt.getMemorySpaceAsInt() != 0;
         return false;
       };
@@ -780,24 +762,18 @@ public:
 
     target.addDynamicallyLegalOp<scf::ForOp>([&](scf::ForOp op) {
       for (auto o : op.getRegionIterArgs()) {
-        if (o.getType().isa<air::AsyncTokenType>())
+        if (llvm::isa<air::AsyncTokenType>(o.getType()))
           return false;
       }
       return true;
     });
 
-    target.addDynamicallyLegalOp<scf::ParallelOp>([&](scf::ParallelOp op) {
-      // for (auto o : op.getRegionIterArgs()) {
-      //   if (o.getType().isa<air::AsyncTokenType>())
-      //     return false;
-      // }
-      // return true;
-      return false;
-    });
+    target.addDynamicallyLegalOp<scf::ParallelOp>(
+        [&](scf::ParallelOp op) { return false; });
 
     target.addDynamicallyLegalOp<scf::YieldOp>([&](scf::YieldOp op) {
       for (auto v : op.getResults()) {
-        if (v.getType().isa<air::AsyncTokenType>())
+        if (llvm::isa<air::AsyncTokenType>(v.getType()))
           return false;
       }
       return true;
@@ -808,9 +784,8 @@ public:
     });
 
     target.addDynamicallyLegalOp<memref::DeallocOp>([&](memref::DeallocOp op) {
-      return (
-          op.getMemref().getType().cast<MemRefType>().getMemorySpaceAsInt() ==
-          0);
+      return (llvm::cast<MemRefType>(op.getMemref().getType())
+                  .getMemorySpaceAsInt() == 0);
     });
 
     RewritePatternSet typeConversionPatterns(context);
@@ -835,7 +810,8 @@ public:
   }
 };
 
-} // namespace
+} // namespace air
+} // namespace xilinx
 
 namespace xilinx {
 namespace air {

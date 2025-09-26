@@ -7,10 +7,10 @@
 //===----------------------------------------------------------------------===//
 
 // RUN: air-opt %s -air-to-std | FileCheck %s
-// CHECK: %{{.*}} = airrt.herd_load "herd_0" : i64
 // CHECK: airrt.memcpy_nd({{.*}}) : (memref<64x64xi32, 1>, memref<64x64xi32>, [i64, i64, i64, i64], [i64, i64, i64, i64], [i64, i64, i64])
 // CHECK: airrt.memcpy_nd({{.*}}) : (memref<64x64xi32, 1>, memref<64x64xi32>, [i64, i64, i64, i64], [i64, i64, i64, i64], [i64, i64, i64])
 // CHECK: airrt.memcpy_nd({{.*}}) : (memref<64x64xi32, 1>, memref<64x64xi32>, [i64, i64, i64, i64], [i64, i64, i64, i64], [i64, i64, i64])
+// CHECK: %{{.*}} = airrt.herd_load "herd_0" () : () -> i64
 // CHECK: airrt.memcpy_nd({{.*}}) : (memref<64x64xi32>, memref<64x64xi32, 1>, [i64, i64, i64, i64], [i64, i64, i64, i64], [i64, i64, i64])
 module attributes {torch.debug_module_name = "mmult"}  {
   func.func @forward(%arg0: memref<64x64xi32>, %arg1: memref<64x64xi32>, %arg2: memref<?x?xi32>) {
@@ -69,7 +69,6 @@ module attributes {torch.debug_module_name = "mmult"}  {
         memref.dealloc %8 : memref<32x32xi32, 2>
         memref.dealloc %9 : memref<32x32xi32, 2>
       }
-      air.herd_terminator
     }
     air.dma_memcpy_nd (%1[%c0, %c0] [%c64, %c64] [%c64, %c1], %4[] [] []) {id = 8 : i32} : (memref<64x64xi32>, memref<64x64xi32, 1>)
     memref.dealloc %2 : memref<64x64xi32, 1>

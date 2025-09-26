@@ -12,8 +12,8 @@
 // CHECK-LABEL:   func.func @task(
 // CHECK-SAME:               %[[VAL_0:.*]]: tensor<128x128xi32>,
 // CHECK-SAME:               %[[VAL_1:.*]]: tensor<128x128xi32>) -> tensor<128x128xi32> {
-// CHECK:           %[[VAL_2:.*]] = bufferization.to_memref %[[VAL_0]] : memref<128x128xi32>
-// CHECK:           %[[VAL_3:.*]] = bufferization.to_memref %[[VAL_1]] : memref<128x128xi32>
+// CHECK:           %[[VAL_2:.*]] = bufferization.to_buffer %[[VAL_0]]
+// CHECK:           %[[VAL_3:.*]] = bufferization.to_buffer %[[VAL_1]]
 // CHECK:           %[[VAL_4:.*]] = memref.alloc() : memref<128x128xi32>
 // CHECK:           %[[VAL_7:.*]] = arith.constant 0 : index
 // CHECK:           %[[VAL_6:.*]] = arith.constant 128 : index
@@ -23,25 +23,25 @@
 // CHECK:               %[[VAL_11:.*]] = memref.subview %[[VAL_2]]{{\[}}%[[VAL_8]], %[[VAL_10]]] [32, 32] [1, 1] : memref<128x128xi32> to memref<32x32xi32, strided<[128, 1], offset: ?>>
 // CHECK:               %[[VAL_12:.*]] = memref.subview %[[VAL_3]]{{\[}}%[[VAL_10]], %[[VAL_9]]] [32, 32] [1, 1] : memref<128x128xi32> to memref<32x32xi32, strided<[128, 1], offset: ?>>
 // CHECK:               %[[VAL_13:.*]] = memref.subview %[[VAL_4]]{{\[}}%[[VAL_8]], %[[VAL_9]]] [32, 32] [1, 1] : memref<128x128xi32> to memref<32x32xi32, strided<[128, 1], offset: ?>>
-// CHECK:               %[[VAL_14:.*]] = memref.alloc() : memref<32x32xi32, 2>
-// CHECK:               %[[VAL_15:.*]] = memref.alloc() : memref<32x32xi32, 2>
-// CHECK:               %[[VAL_16:.*]] = memref.alloc() : memref<32x32xi32, 2>
-// CHECK:               memref.copy %[[VAL_11]], %[[VAL_14]] : memref<32x32xi32, strided<[128, 1], offset: ?>> to memref<32x32xi32, 2>
-// CHECK:               memref.copy %[[VAL_12]], %[[VAL_15]] : memref<32x32xi32, strided<[128, 1], offset: ?>> to memref<32x32xi32, 2>
-// CHECK:               memref.copy %[[VAL_13]], %[[VAL_16]] : memref<32x32xi32, strided<[128, 1], offset: ?>> to memref<32x32xi32, 2>
-// CHECK:               linalg.matmul ins(%[[VAL_14]], %[[VAL_15]] : memref<32x32xi32, 2>, memref<32x32xi32, 2>) outs(%[[VAL_16]] : memref<32x32xi32, 2>)
-// CHECK:               memref.copy %[[VAL_16]], %[[VAL_13]] : memref<32x32xi32, 2> to memref<32x32xi32, strided<[128, 1], offset: ?>>
-// CHECK:               memref.dealloc %[[VAL_14]] : memref<32x32xi32, 2>
-// CHECK:               memref.dealloc %[[VAL_15]] : memref<32x32xi32, 2>
-// CHECK:               memref.dealloc %[[VAL_16]] : memref<32x32xi32, 2>
+// CHECK:               %[[VAL_14:.*]] = memref.alloc() : memref<32x32xi32, 2 : i32>
+// CHECK:               %[[VAL_15:.*]] = memref.alloc() : memref<32x32xi32, 2 : i32>
+// CHECK:               %[[VAL_16:.*]] = memref.alloc() : memref<32x32xi32, 2 : i32>
+// CHECK:               memref.copy %[[VAL_11]], %[[VAL_14]] : memref<32x32xi32, strided<[128, 1], offset: ?>> to memref<32x32xi32, 2 : i32>
+// CHECK:               memref.copy %[[VAL_12]], %[[VAL_15]] : memref<32x32xi32, strided<[128, 1], offset: ?>> to memref<32x32xi32, 2 : i32>
+// CHECK:               memref.copy %[[VAL_13]], %[[VAL_16]] : memref<32x32xi32, strided<[128, 1], offset: ?>> to memref<32x32xi32, 2 : i32>
+// CHECK:               linalg.matmul ins(%[[VAL_14]], %[[VAL_15]] : memref<32x32xi32, 2 : i32>, memref<32x32xi32, 2 : i32>) outs(%[[VAL_16]] : memref<32x32xi32, 2 : i32>)
+// CHECK:               memref.copy %[[VAL_16]], %[[VAL_13]] : memref<32x32xi32, 2 : i32> to memref<32x32xi32, strided<[128, 1], offset: ?>>
+// CHECK:               memref.dealloc %[[VAL_14]] : memref<32x32xi32, 2 : i32>
+// CHECK:               memref.dealloc %[[VAL_15]] : memref<32x32xi32, 2 : i32>
+// CHECK:               memref.dealloc %[[VAL_16]] : memref<32x32xi32, 2 : i32>
 // CHECK:             }
 module  {
   func.func @task(%arg0: tensor<128x128xi32>, %arg1: tensor<128x128xi32>) -> tensor<128x128xi32> {
-    %0 = bufferization.to_memref %arg0 : memref<128x128xi32>
-    %1 = bufferization.to_memref %arg1 : memref<128x128xi32>
+    %0 = bufferization.to_buffer %arg0 : tensor<128x128xi32> to memref<128x128xi32>
+    %1 = bufferization.to_buffer %arg1 : tensor<128x128xi32> to memref<128x128xi32>
     %2 = memref.alloc() : memref<128x128xi32>
     linalg.matmul ins(%0, %1 : memref<128x128xi32>, memref<128x128xi32>) outs(%2 : memref<128x128xi32>)
-    %3 = bufferization.to_tensor %2 : memref<128x128xi32>
+    %3 = bufferization.to_tensor %2 : memref<128x128xi32> to tensor<128x128xi32>
     return %3 : tensor<128x128xi32>
   }
 }

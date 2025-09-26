@@ -14,7 +14,15 @@
 #
 ##===----------------------------------------------------------------------===##
 
-export commithash=d022f6b8ff94bb13d12d39f23a3c3e7836e90756
+export commithash=064f02dac0c81c19350a74415b3245f42fed09dc
+DATETIME=2025090500
+WHEEL_VERSION=22.0.0.$DATETIME+${commithash:0:8}
+
+if [ x"$1" == x--get-wheel-version ]; then
+  echo $WHEEL_VERSION
+  exit 0
+fi
+
 target_dir=llvm
 
 # clone llvm if it is not there already

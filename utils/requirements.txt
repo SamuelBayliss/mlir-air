@@ -1,8 +1,13 @@
+PyYAML>=6.0.2
+aiofiles
+filelock==3.13.1
+lit
 joblib
 ipykernel
 psutil
 rich
 pybind11
-numpy
+nanobind
+numpy<2
 cmake
 bfloat16

@@ -5,7 +5,7 @@
 //
 //===----------------------------------------------------------------------===//
 
-// RUN: air-opt -air-fuse-channels="aggressive-mode=true" -air-to-aie="emit-while-loop=false use-objectfifo=false row-offset=3 col-offset=5 device=xcve2802" %s | FileCheck %s
+// RUN: air-opt -air-fuse-channels="aggressive-mode=L1,L2,L3" -air-to-aie="emit-while-loop=false use-objectfifo=false row-offset=3 col-offset=5 device=xcve2802" %s | FileCheck %s
 
 // CHECK-LABEL:   aie.device(xcve2802) {
 // CHECK:   %[[VAL_0:.*]] = aie.tile(2, 0)
@@ -17,16 +17,16 @@
 // CHECK:   %[[VAL_7:.*]] = aie.tile(6, 4)
 // CHECK-COUNT-8:    aie.lock(%[[VAL_3]], {{.*}})
 // CHECK-COUNT-2:    aie.lock(%[[VAL_2]], {{.*}})
-// CHECK-COUNT-8:    aie.lock(%[[VAL_4]], {{.*}})
-// CHECK-COUNT-8:    aie.lock(%[[VAL_5]], {{.*}})
-// CHECK-COUNT-8:    aie.lock(%[[VAL_6]], {{.*}})
-// CHECK-COUNT-8:    aie.lock(%[[VAL_7]], {{.*}})
-// CHECK:    aie.buffer(%[[VAL_2]]) {sym_name = {{.*}}} : memref<64x64xi32, 1>
-// CHECK:    aie.buffer(%[[VAL_3]]) {sym_name = {{.*}}} : memref<64x128xi32, 1>
-// CHECK:    aie.buffer(%[[VAL_3]]) {sym_name = {{.*}}} : memref<128x64xi32, 1>
-// CHECK:    aie.buffer(%[[VAL_3]]) {sym_name = {{.*}}} : memref<64x128xi32, 1>
-// CHECK:    aie.buffer(%[[VAL_3]]) {sym_name = {{.*}}} : memref<128x64xi32, 1>
-// CHECK-COUNT-20:    aie.buffer({{.*}}) {sym_name = {{.*}}} : memref<32x32xi32, 2>
+// CHECK-COUNT-6:    aie.lock(%[[VAL_4]], {{.*}})
+// CHECK-COUNT-6:    aie.lock(%[[VAL_5]], {{.*}})
+// CHECK-COUNT-6:    aie.lock(%[[VAL_6]], {{.*}})
+// CHECK-COUNT-6:    aie.lock(%[[VAL_7]], {{.*}})
+// CHECK:    aie.buffer(%[[VAL_2]]) {{{.*}}} : memref<64x64xi32, 1>
+// CHECK-DAG:    aie.buffer(%[[VAL_3]]) {{{.*}}} : memref<64x128xi32, 1>
+// CHECK-DAG:    aie.buffer(%[[VAL_3]]) {{{.*}}} : memref<128x64xi32, 1>
+// CHECK-DAG:    aie.buffer(%[[VAL_3]]) {{{.*}}} : memref<64x128xi32, 1>
+// CHECK-DAG:    aie.buffer(%[[VAL_3]]) {{{.*}}} : memref<128x64xi32, 1>
+// CHECK-COUNT-20:    aie.buffer({{.*}}) {{{.*}}} : memref<32x32xi32, 2>
 // CHECK:   aie.mem(%[[VAL_7]])
 // CHECK:   aie.core(%[[VAL_7]]) {
 // CHECK:     aie.use_lock({{.*}}, AcquireGreaterEqual, 1)
@@ -230,12 +230,6 @@ module {
               %async_token_44 = air.execute [%arg19, %22, %21] {
                 linalg.matmul {cast = #linalg.type_fn<cast_signed>} ins(%results_40, %results_42 : memref<32x32xi32, 2>, memref<32x32xi32, 2>) outs(%results_34 : memref<32x32xi32, 2>)
               }
-              %async_token_45 = air.execute {
-                memref.dealloc %results_40 : memref<32x32xi32, 2>
-              }
-              %async_token_46 = air.execute {
-                memref.dealloc %results_42 : memref<32x32xi32, 2>
-              }
               %23 = affine.if #set()[%arg12, %arg13] -> !air.async.token {
                 %26 = air.channel.get async [%22, %21, %arg18]  @channel_0[%arg12, %arg13] (%results_38[] [] []) {id = 15 : i32} : (memref<32x32xi32, 2>)
                 affine.yield %26 : !air.async.token
@@ -253,12 +247,6 @@ module {
               %async_token_47 = air.execute [%async_token_44, %24, %23] {
                 linalg.matmul {cast = #linalg.type_fn<cast_signed>} ins(%results_38, %results_36 : memref<32x32xi32, 2>, memref<32x32xi32, 2>) outs(%results_34 : memref<32x32xi32, 2>)
               }
-              %async_token_48 = air.execute {
-                memref.dealloc %results_38 : memref<32x32xi32, 2>
-              }
-              %async_token_49 = air.execute {
-                memref.dealloc %results_36 : memref<32x32xi32, 2>
-              }
               %25 = air.wait_all async [%23, %24] 
               scf.yield %async_token_44, %async_token_47, %async_token_47, %25 : !air.async.token, !air.async.token, !air.async.token, !air.async.token
             }
@@ -266,7 +254,12 @@ module {
             %async_token_43 = air.execute [%20] {
               memref.dealloc %results_34 : memref<32x32xi32, 2>
             }
-            air.herd_terminator
+            %async_token_48 = air.execute {
+              memref.dealloc %results_38 : memref<32x32xi32, 2>
+            }
+            %async_token_49 = air.execute {
+              memref.dealloc %results_36 : memref<32x32xi32, 2>
+            }
           }
           %14 = scf.parallel (%arg12, %arg13) = (%c0_16, %c0_16) to (%c2_15, %c2_15) step (%c1_13, %c1_13) init (%arg11) -> !air.async.token {
             %async_token_30, %results_31 = air.execute -> (index) {
@@ -342,12 +335,6 @@ module {
             %36 = air.channel.put async [%arg16]  @channel_3[] (%results_28[%arg15, %c32] [%c32, %c32] [%c64_14, %c1_13]) {id = 11 : i32} : (memref<128x64xi32, 1>)
             scf.yield %36 : !air.async.token
           }
-          %async_token_30 = air.execute {
-            memref.dealloc %results_26 : memref<64x128xi32, 1>
-          }
-          %async_token_31 = air.execute {
-            memref.dealloc %results_28 : memref<128x64xi32, 1>
-          }
           %23 = air.wait_all async [%13, %14, %22, %20, %18, %16] 
           %24 = air.channel.get async [%14, %13, %arg12]  @channel_5[] (%results_24[] [] []) {id = 21 : i32} : (memref<64x128xi32, 1>)
           %25 = air.channel.get async [%14, %13, %arg12]  @channel_6[] (%results_22[] [] []) {id = 22 : i32} : (memref<128x64xi32, 1>)
@@ -371,12 +358,6 @@ module {
             %36 = air.channel.put async [%arg16]  @channel_3[] (%results_22[%arg15, %c32] [%c32, %c32] [%c64_14, %c1_13]) {id = 26 : i32} : (memref<128x64xi32, 1>)
             scf.yield %36 : !air.async.token
           }
-          %async_token_32 = air.execute {
-            memref.dealloc %results_24 : memref<64x128xi32, 1>
-          }
-          %async_token_33 = air.execute {
-            memref.dealloc %results_22 : memref<128x64xi32, 1>
-          }
           %34 = air.wait_all async [%24, %25, %33, %31, %29, %27] 
           %35 = air.wait_all async [%24, %25] 
           scf.yield %23, %34, %34, %35 : !air.async.token, !air.async.token, !air.async.token, !air.async.token
@@ -385,9 +366,13 @@ module {
         %async_token_29 = air.execute [%12] {
           memref.dealloc %results_20 : memref<64x64xi32, 1>
         }
-        air.segment_terminator
+        %async_token_32 = air.execute {
+          memref.dealloc %results_24 : memref<64x128xi32, 1>
+        }
+        %async_token_33 = air.execute {
+          memref.dealloc %results_22 : memref<128x64xi32, 1>
+        }
       }
-      air.launch_terminator
     }
     return
   }

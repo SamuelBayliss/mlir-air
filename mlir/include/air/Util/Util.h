@@ -12,7 +12,9 @@
 #include "air/Dialect/AIR/AIRDialect.h"
 #include "mlir/Dialect/Affine/IR/AffineOps.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
+#include "mlir/Dialect/Vector/IR/VectorOps.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/BuiltinTypes.h"
 
@@ -43,7 +45,8 @@ HerdOp getHerdArgOwner(Value val);
 // Get the parent air.hierarchy op of a tile id
 HierarchyInterface getHierarchyArgOwner(Value val);
 // Get the scf parent op from scf.yield op
-template <typename T> T getScfParentOpFromYieldOp(Operation *yield) {
+template <typename T>
+T getScfParentOpFromYieldOp(Operation *yield) {
   return dyn_cast_if_present<T>(yield->getParentOp());
 }
 
@@ -58,12 +61,12 @@ void eraseAIRHierarchyOperand(HierarchyInterface op, unsigned index);
 int getIdAttr(Operation *op);
 
 // Renumber the DMA ops. Mode can be within a herd or global
-void renumberDmaOps(func::FuncOp func, std::string mode = "herd");
-void renumberChannelOps(Block *region);
-void renumberChannelOps(Block *region, std::map<int, int> &reverse_map);
+void renumberMemcpyIfOps(Region *region);
+void renumberMemcpyIfOps(Region *region, std::map<int, int> &reverse_map);
 
 // Return op name as string
 std::string to_string(Operation *op);
+// Return type name as string
 std::string to_string(mlir::Type t);
 
 // Generate a new unique channel name
@@ -89,6 +92,9 @@ std::vector<ChannelGetOp> getTheOtherChannelOpThroughSymbol(ChannelPutOp put);
 std::vector<ChannelPutOp> getTheOtherChannelOpThroughSymbol(ChannelGetOp get);
 std::vector<air::ChannelInterface>
 getTheOtherChannelOpThroughSymbol(air::ChannelInterface op);
+// Get integer index to metadataArray, from channel bundle indices.
+std::optional<int>
+getIndexToMetadataArrayFromChannelIndices(air::ChannelInterface op);
 void getSizesFromIntegerSet(MLIRContext *ctx, IntegerSet int_set,
                             SmallVector<int, 2> &lbs_int,
                             SmallVector<int, 2> &ubs_int);
@@ -113,6 +119,17 @@ Operation *
 getAffineIfNestAndSpatialLoopFromOp(Operation *op,
                                     std::vector<Operation *> &affine_if_nest,
                                     Operation *&spatial_loop);
+
+// Evaluate the condition lower and upper boundaries that the specified op is
+// hitting, from an affine if nest. Assumes a rectangular condition bound
+// region.
+SmallVector<std::pair<int, int>> getRectangularConditionBoundsThroughAffineIfs(
+    Operation *op, Operation *spatial_loop,
+    std::vector<Operation *> affine_if_nest);
+
+// Evaluate the integer value of affine set expression if the only symbolic
+// identifier is replaced with zero
+int evaluateSymbolEqualityInSet(AffineExpr c, MLIRContext *ctx);
 
 struct LinalgTransforms {
   static const StringLiteral kLinalgTransformMarker;
@@ -139,17 +156,18 @@ std::vector<unsigned> getMDVectorFromIterator(std::vector<unsigned> dims,
 void getDefiningOpsToOperands(Operation *op, SmallVector<Operation *> &def_ops);
 
 // Fold perfectly nested parent loops into wraps and strides list
-void foldForLoopNestAsExtendedSizesAndStrides(
+LogicalResult foldForLoopNestAsExtendedSizesAndStrides(
     OpBuilder builder, Operation *for_op, Operation *channel_op,
     SmallVector<Value> &offsets, SmallVector<Value> &wraps,
     SmallVector<Value> &strides, Value memref);
 
+// Find the largest factor of 'num' which is not larger than 'max'.
+int findLargestFactor(int num, int max);
+
 // Canonicalize wrap and stride lists, by removing redundant dimensions.
-LogicalResult canonicalizeWrapAndStrideList(OpBuilder builder,
-                                            SmallVector<Value> &offsets,
-                                            SmallVector<Value> &sizes,
-                                            SmallVector<Value> &strides,
-                                            int memref_volume);
+LogicalResult canonicalizeWrapAndStrideList(
+    OpBuilder &builder, SmallVector<Value> &offsets, SmallVector<Value> &sizes,
+    SmallVector<Value> &strides, int memref_volume, int maxSize = -1);
 
 // If wrap-and-stride lists are empty, populate them with default data access
 // layout (contiguous, row-major).
@@ -161,8 +179,12 @@ void populateDefaultWrapsAndStrides(OpBuilder builder, Value memref,
 // Check if the wraps and strides imply the default (contiguous, row-major) data
 // access pattern.
 bool isDefaultDataAccessPattern(SmallVector<Value> memcpy_sizes,
-                                SmallVector<Value> memcpy_strides,
-                                Value memref);
+                                SmallVector<Value> memcpy_strides);
+// Check if the volume of sizes equals the volume of the memref.
+// Return true if equal, and return false if any size value is not constant,
+// or memref shape isn't static.
+bool isVolumeEqualToMemrefVolume(SmallVector<Value> memcpy_sizes,
+                                 BaseMemRefType memref);
 // Get the memref size along a given dimension, that the access pattern actually
 // covers.
 SmallVector<int64_t>
@@ -172,9 +194,27 @@ getEffectiveMemrefSizeFromAccessPattern(SmallVector<int> memref_shape,
 
 // Get the overall data access pattern from air.channel ops which access the
 // memref.
+std::tuple<SmallVector<Value>, SmallVector<Value>, SmallVector<Value>>
+writeAccessPattern(air::ChannelInterface chanOp);
+std::tuple<SmallVector<Value>, SmallVector<Value>, SmallVector<Value>>
+writeAccessPattern(memref::SubViewOp subview, Region *commonReg = nullptr);
+std::tuple<SmallVector<Value>, SmallVector<Value>, SmallVector<Value>>
+writeAccessPattern(mlir::vector::TransferReadOp readOp);
+std::tuple<SmallVector<Value>, SmallVector<Value>, SmallVector<Value>>
+writeAccessPattern(mlir::vector::TransferWriteOp writeOp);
+SmallVector<int64_t>
+getDataAccessShapeFromMemcpyOp(Value memref,
+                               SmallVector<air::ChannelInterface> chanUsers);
 SmallVector<int64_t>
 getDataAccessShapeFromMemcpyOp(Value memref,
                                SmallVector<air::ChannelInterface> chanOps);
+SmallVector<int64_t> getDataAccessShapeFromMemcpyOp(
+    Value memref,
+    SmallVector<
+        std::tuple<SmallVector<Value>, SmallVector<Value>, SmallVector<Value>>>
+        patterns);
+SmallVector<int64_t>
+getDataAccessShapeFromMemcpyOp(Value memref, SmallVector<Operation *> users);
 
 // Update strides after memref shrinkage. Assuming there is only one dimension
 // being shrunk.
@@ -182,6 +222,101 @@ SmallVector<int>
 getUpdatedStridesAfterShrinkage(SmallVector<int> old_memref_shape,
                                 SmallVector<int64_t> new_memref_shape,
                                 SmallVector<Value> strides);
+// Update offsets after memref shrinkage.
+SmallVector<int>
+getUpdatedOffsetsAfterShrinkage(SmallVector<int> old_memref_shape,
+                                SmallVector<int64_t> new_memref_shape,
+                                SmallVector<Value> offsets);
+
+// Given a dimension on wrap-and-stride list, infer the dimension on memref that
+// this pattern spans completely on.
+std::optional<int> getMemrefDimFromOffsetDim(int dimOnOffset,
+                                             SmallVector<Value> offsets,
+                                             SmallVector<Value> strides,
+                                             SmallVector<int> memrefShape);
+
+// Given a dimension on memref shape, infer the dimension on wrap-and-stride
+// list that spans on this memref dimension.
+std::optional<int> getOffsetDimFromMemrefDim(int dimOnMemref,
+                                             SmallVector<Value> strides,
+                                             SmallVector<int> memrefShape);
+
+// Evaluate the affine expression of affine map on a sparse vector of constant
+// ints.
+std::optional<int64_t>
+evaluateConstantsInMap(AffineMap map,
+                       SmallVector<std::optional<int64_t>> symAndDimInputs,
+                       MLIRContext *ctx);
+std::optional<int64_t> evaluateConstantsInMap(
+    AffineMap map, SmallVector<std::optional<int64_t>> symbolInputs,
+    SmallVector<std::optional<int64_t>> dimInputs, MLIRContext *ctx);
+
+// Extend the lookupOrDefault method to operate on a vector of values.
+Value lookupOrDefaultRange(Value v, IRMapping &remap);
+SmallVector<Value> lookupOrDefaultRange(SmallVectorImpl<Value> &vec,
+                                        IRMapping &remap);
+SmallVector<Value> lookupOrDefaultRange(OperandRange vec, IRMapping &remap);
+
+// Extend isPure method to operate on air.execute.
+bool isPure(Operation *op);
+
+// Return if the given block contains N ops which are impure and aren't async
+// wait ops (such as air.wait_all).
+bool hasNImpureOps(Block *block, unsigned N);
+
+// Return if the given block contains N ops or not, not counting the block's
+// terminator.
+bool hasNElements(Block *block, unsigned N);
+
+// Get backward slice to a vector of values, within a specified region.
+void getBackwardSliceInRegion(OpBuilder builder, Region *region,
+                              SmallVectorImpl<Value> &vals,
+                              SetVector<Operation *> &backwardSlices);
+
+// Buffer all allocations of memref directly within the func op's body into the
+// func op's arguments.
+void populateBufferMemrefToFuncArgsPattern(RewritePatternSet &patterns);
+
+// Find a common region that contains all ops, or ancestors of ops, until a
+// specified region.
+Region *findCommonRegionContainingAllAncestors(SmallVector<Operation *> ops,
+                                               Operation *until = nullptr);
+
+// A lite version of OperationEquivalence::isRegionEquivalentTo which only
+// checks for const value equivalences.
+bool isRegionEquivalentTo(Region *lhs, Region *rhs);
+// A lite version of OperationEquivalence::isEquivalentTo which only checks for
+// const value equivalences.
+bool isEquivalentTo(Operation *lhs, Operation *rhs);
+
+// Generate composed affine apply op from arith addi op operating on Index
+// values.
+affine::AffineApplyOp
+consructComposedAffineApplyOpFromArithAddI(OpBuilder &builder,
+                                           arith::AddIOp addOp);
+
+// Generate composed affine apply op from arith muli op operating on Index
+// values.
+affine::AffineApplyOp
+consructComposedAffineApplyOpFromArithMulI(OpBuilder &builder,
+                                           arith::MulIOp mulOp);
+
+/// Get bands of loops that are valid to tile from the top-level of `f`.
+/// Ref: mlir/lib/Dialect/Affine/Transforms/LoopTiling.cpp
+void getTopLevelTileableBands(
+    func::FuncOp f, std::vector<SmallVector<affine::AffineForOp, 6>> &bands);
+
+// clones a given operation along with all of its dependency operations (from
+// its backward slice) that satisfy a user-defined filter, remapping their
+// operands and results in the process.
+Operation *cloneOpAndOperands(
+    RewriterBase &rewriter, IRMapping &remap, Operation *op,
+    function_ref<bool(Operation *)> canClone = [](Operation *o) {
+      // default: only pure ops; avoid loops/hierarchy
+      return !isa<LoopLikeOpInterface>(o) && !isa<air::HierarchyInterface>(o);
+    });
+
+bool opOrAncestorIsDominantOver(Operation *a, Operation *b);
 
 } // namespace air
 } // namespace xilinx

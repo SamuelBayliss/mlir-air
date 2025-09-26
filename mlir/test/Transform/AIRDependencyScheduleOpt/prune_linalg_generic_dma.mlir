@@ -34,10 +34,8 @@ module attributes {torch.debug_module_name = "model"} {
       air.segment args(%arg9=%arg2, %arg10=%arg3, %arg11=%arg4, %arg12=%arg5, %arg13=%5, %arg14=%6) : index, index, index, index, memref<64x64xbf16, 1>, memref<64x64xbf16, 1> {
       // CHECK: %[[EVENT0:.*]], %[[VALUE0:.*]] = air.execute
       // CHECK: %[[EVENT1:.*]], %[[VALUE1:.*]] = air.execute
-      // CHECK: %[[EVENT2:.*]], %[[VALUE2:.*]] = air.execute
-      // CHECK: %[[EVENT3:.*]], %[[VALUE3:.*]] = air.execute
       // CHECK: %[[EVENT4:.*]] = air.dma_memcpy_nd async 
-      // CHECK: %[[EVENT5:.*]] = air.segment async [%[[EVENT0]], %[[EVENT1]], %[[EVENT3]], %[[EVENT4]]]
+      // CHECK: %[[EVENT5:.*]] = air.segment async [%[[EVENT1]], %[[EVENT4]]]
         %c1_1 = arith.constant 1 : index
         %c2_0 = arith.constant 2 : index
         %c64_2 = arith.constant 64 : index
@@ -79,16 +77,13 @@ module attributes {torch.debug_module_name = "model"} {
           air.dma_memcpy_nd (%arg19[%7, %8] [%c32, %c32] [%c64_1, %c1_0], %10[] [] []) {id = 7 : i32} : (memref<64x64xbf16, 1>, memref<32x32xbf16, 2>)
           memref.dealloc %9 : memref<32x32xbf16, 2>
           memref.dealloc %10 : memref<32x32xbf16, 2>
-          air.herd_terminator
         }
         air.dma_memcpy_nd (%arg14[%arg9, %arg10] [%c64_2, %c64_2] [%c1024_0, %c1_1], %new_1[] [] []) {id = 8 : i32} : (memref<64x64xbf16, 1>, memref<64x64xbf16, 1>)
         memref.dealloc %new_0 : memref<64x64xbf16, 1>
         memref.dealloc %new_1 : memref<64x64xbf16, 1>
-        air.segment_terminator
       }
       memref.dealloc %5 : memref<64x64xbf16, 1>
       memref.dealloc %6 : memref<64x64xbf16, 1>
-      air.launch_terminator
     }
     return
   }

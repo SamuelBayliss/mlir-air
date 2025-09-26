@@ -13,7 +13,7 @@ func.func @foo(%arg0: i32) {
   %cst1 = arith.constant 1 : index
   // CHECK: aie.device
   // CHECK: %[[VAL_0:.*]] = aie.tile(1, 1)
-  // CHECK: %[[VAL_1:.*]] = aie.buffer(%[[VAL_0]]) {sym_name = "buf0"} : memref<1024xi32, 2>
+  // CHECK: %[[VAL_1:.*]] = aie.buffer(%[[VAL_0]]) {{{.*}}} : memref<1024xi32, 2>
   // CHECK: aie.core(%[[VAL_0]])  {
   // CHECK:   call @beefmaker_kernel(%[[VAL_1]]) : (memref<1024xi32, 2>) -> ()
   // CHECK:   aie.end
@@ -21,7 +21,6 @@ func.func @foo(%arg0: i32) {
   air.herd tile(%tx, %ty) in (%size_x = %cst1, %size_y = %cst1) attributes {link_with="beefmaker.o"} {
     %src0 = memref.alloc() : memref<1024xi32, 2>
     func.call @beefmaker_kernel(%src0) : (memref<1024xi32, 2>) -> ()
-    air.herd_terminator
   }
   return
 } 

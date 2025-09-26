@@ -95,10 +95,10 @@ def AIRRt_HerdMetadataTerminatorOp
 
 def AIRRt_HerdLoadOp : AIRRt_Op<"herd_load", []> {
     let summary = "load a herd";
-    let arguments = (ins StrAttr:$sym_name);
+    let arguments = (ins StrAttr:$sym_name, Variadic<AnyType>:$rtp);
     let results = (outs I64:$h, Optional<AIRRt_Event>:$event);
     let assemblyFormat = [{
-      $sym_name attr-dict `:` type($h) (`,` type($event)^)?
+      $sym_name ` ``(` $rtp `)` attr-dict `:` functional-type($rtp, results)
     }];
 }
 
@@ -117,7 +117,7 @@ def AIRRt_DmaMemcpyNdOp: AIRRt_Op<"dma_memcpy_nd", []> {
     ins I32:$id,
         I64:$x,
         I64:$y,
-        AnyMemRef:$memref,
+        AnyRankedOrUnrankedMemRef:$memref,
         I64:$offset3,
         I64:$offset2,
         I64:$offset1,
@@ -149,8 +149,8 @@ def AIRRt_DmaMemcpyNdOp: AIRRt_Op<"dma_memcpy_nd", []> {
 def AIRRt_MemcpyNdOp: AIRRt_Op<"memcpy_nd", []> {
   let summary = "dma operator";
   let arguments = (
-    ins AnyMemRef:$dst,
-        AnyMemRef:$src,
+    ins AnyRankedOrUnrankedMemRef:$dst,
+        AnyRankedOrUnrankedMemRef:$src,
         I64:$offset3,
         I64:$offset2,
         I64:$offset1,
@@ -189,6 +189,7 @@ def AIRRt_AllocOp: AIRRt_Op<"alloc", []> {
   let description = [{
     AIRRt Allocation Op
   }];
+  let hasCanonicalizer  = 1;
 }
 
 def AIRRt_DeallocOp: AIRRt_Op<"dealloc", []> {
@@ -201,6 +202,7 @@ def AIRRt_DeallocOp: AIRRt_Op<"dealloc", []> {
   let description = [{
     AIRRt Deallocation Op
   }];
+  let hasCanonicalizer  = 1;
 }
 
 def AIRRt_WaitAllOp : AIRRt_Op<"wait_all", []> {

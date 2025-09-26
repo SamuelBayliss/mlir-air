@@ -39,10 +39,13 @@ namespace air {
 //===----------------------------------------------------------------------===//
 
 bool areEqualIndices(mlir::Value index_0, mlir::Value index_1);
-void traceDependentInductionVar(air::DmaMemcpyNdOp async_op,
+void traceDependentInductionVar(SmallVector<Value, 1> candidate_scalar_operands,
                                 SmallVector<Value, 1> &loop_dep_history,
                                 std::vector<Operation *> &op_history);
-void traceDependentInductionVar(air::AsyncOpInterface async_op,
+void traceDependentInductionVar(air::MemcpyInterface memcpyif_op,
+                                SmallVector<Value, 1> &loop_dep_history,
+                                std::vector<Operation *> &op_history);
+void traceDependentInductionVar(Operation *op,
                                 SmallVector<Value, 1> &loop_dep_history,
                                 std::vector<Operation *> &op_history);
 void traceDependentHerdId(air::AsyncOpInterface async_op,
@@ -66,12 +69,41 @@ Value getAsyncTokenFromOp(Operation *op);
 void addAsyncDependencyIfNew(Operation *op, Value token);
 bool isAsyncOp(Operation *op);
 bool areAsyncDependent(Operation *a, Operation *b);
-scf::ForOp hoistTargetOpsToNewSCFFor(OpBuilder builder, scf::ForOp for_op,
+bool isAsyncDependent(Operation *a, Operation *b);
+scf::ForOp hoistTargetOpsToNewSCFFor(PatternRewriter &rewriter,
+                                     scf::ForOp for_op,
                                      SmallVector<Operation *> target_ops);
-LogicalResult unrollAIRChannelPutGetInScfParallel(OpBuilder builder,
-                                                  scf::ParallelOp par,
-                                                  Operation *originalChanOp,
-                                                  IRMapping remap);
+// Fully unrolls an `scf.for` loop while preserving async token dependencies.
+LogicalResult loopUnrollFullWithAsyncTokenPreserved(
+    scf::ForOp forOp,
+    function_ref<void(unsigned, Operation *, OpBuilder)> annotateFn = nullptr);
+
+// Unrolls an `scf.for` loop by a given factor while preserving async token
+// dependencies.
+LogicalResult loopUnrollByFactorWithAsyncTokenPreserved(
+    scf::ForOp forOp, uint64_t unrollFactor,
+    function_ref<void(unsigned, Operation *, OpBuilder)> annotateFn = nullptr);
+LogicalResult
+unrollScfParallel(OpBuilder builder, scf::ParallelOp par, IRMapping remap,
+                  llvm::DenseMap<Operation *, SmallVector<Operation *>> &opMap);
+LogicalResult unrollScfParallelOnDims(
+    RewriterBase &rewriter, scf::ParallelOp par, IRMapping remap,
+    SmallVector<int> dims,
+    llvm::DenseMap<Operation *, SmallVector<Operation *>> &opMap);
+void populateAIRunrollAIRChannelPutGetInScfParallelPatterns(
+    RewritePatternSet &patterns);
+air::WaitAllOp replaceAsyncOpWithWaitAll(OpBuilder builder, IRMapping &remap,
+                                         Operation *op,
+                                         bool cloneDepList = true);
+FailureOr<SmallVector<
+    std::pair<Value, std::tuple<SmallVector<Value>, SmallVector<Value>,
+                                SmallVector<Value>>>>>
+getAllReadAccessedMemrefOperandsFromOp(Operation *op);
+FailureOr<SmallVector<
+    std::pair<Value, std::tuple<SmallVector<Value>, SmallVector<Value>,
+                                SmallVector<Value>>>>>
+getAllWriteAccessedMemrefOperandsFromOp(Operation *op);
+FailureOr<SmallVector<Value>> getAllAccessedIndexOperandsFromOp(Operation *op);
 
 //===----------------------------------------------------------------------===//
 // Dependency graph
@@ -224,13 +256,13 @@ public:
                           dependencyContext &dep_ctx,
                           std::string granularity = "herd",
                           bool dump_dot = false, std::string dump_dir = "");
+  void canonicalizeRecursive(const dependencyGraph &src, dependencyGraph &dst);
+  void buildEmptyGraphStructure(const dependencyGraph &src,
+                                dependencyGraph &dst);
   void canonicalizeGraphs(const dependencyGraph &global_graph,
                           dependencyGraph &);
 
   void updateDepList(func::FuncOp func, dependencyGraph &global_graph);
-  void removeDepListRepetition(func::FuncOp func);
-  void removeUnusedExecuteOp(func::FuncOp func);
-  void removeRedundantWaitAllOps(func::FuncOp func);
   std::pair<VertexId, dependencyGraph *>
   getVertexFromOp(Operation *op, dependencyContext dep_ctx,
                   std::string front_or_back = "front");
@@ -241,7 +273,7 @@ public:
   std::string toPositionString(std::vector<unsigned> position);
   unsigned getIteratorFromPosition(std::vector<unsigned> position,
                                    Operation *hier_op);
-  void redoDepTraceIfDepOnHier(func::FuncOp func);
+  LogicalResult redoDepTraceIfDepOnHier(func::FuncOp func);
 
 private:
   void addVerticesInHerd(std::vector<dependencyGraph> &herd_subgraphs,
@@ -281,6 +313,11 @@ private:
                                   dependencyContext &dep_ctx);
   std::pair<std::string, unsigned> getTypeIdPairFromOp(Operation *op);
   std::string getOpTypeFromOpImpls(Operation *op);
+  void parseAllDependencyEdges(dependencyGraph &graph,
+                               dependencyContext &dep_ctx);
+  void connectAllTerminators(dependencyGraph &graph);
+  void connectAndUpdateGraphPointers(dependencyGraph &graph,
+                                     dependencyGraph *parent = nullptr);
   void parseDependencyEdgesInGraph(Graph &g, dependencyContext dep_ctx);
   void connectOpToItsDepListImpls(Operation *op, Graph &g,
                                   dependencyContext dep_ctx);
@@ -295,11 +332,10 @@ private:
   void updatePointerFromHierarchyOpToGraph(dependencyGraph &G);
   void transitiveReductionImpl(const Graph &asyncExecuteGraph,
                                Graph &asyncExecuteGraphTR);
+  void purgeAllDependencyLists(dependencyGraph &graph);
+  void fillAllDependencyListsFromTR(dependencyGraph &graph);
   void purgeAIRDepList(dependencyGraph &graph);
   void fillAIRDepListUsingGraphTR(dependencyGraph &graph);
-  std::vector<VertexId>
-  getVerticesWithAffineIf(const Graph &g,
-                          const std::vector<unsigned> &position);
 };
 
 //===----------------------------------------------------------------------===//
@@ -308,8 +344,17 @@ private:
 
 struct partialMemref {
   Value memrefValue;
-  unsigned numDims;
-  SmallVector<Value, 2> memrefIndices;
+  SmallVector<Value> offsets, sizes, strides;
+  partialMemref() = default;
+  partialMemref(mlir::Value m) { memrefValue = m; };
+  partialMemref(mlir::Value m, SmallVector<Value> memrefOffsets,
+                SmallVector<Value> memrefSizes,
+                SmallVector<Value> memrefStrides) {
+    memrefValue = m;
+    offsets = memrefOffsets;
+    sizes = memrefSizes;
+    strides = memrefStrides;
+  };
 };
 
 class dependencyTracer {
@@ -325,16 +370,18 @@ public:
 
   // Trace dependency from op
   template <typename T>
-  void traceDependencyFromOp(SmallVector<partialMemref, 1> operands,
-                             T sink_air_op, std::string dep_type) {
+  LogicalResult traceDependencyFromOp(SmallVector<partialMemref, 1> operands,
+                                      T sink_air_op, std::string dep_type) {
 
     char dep_tracing_mode = 'n';
     if (dep_type == "RAW")
       dep_tracing_mode = 'w';
     else if (dep_type == "WAW/WAR")
       dep_tracing_mode = 'n';
-    else
-      assert(false && "Unknown dependency type");
+    else {
+      sink_air_op->emitOpError("Unknown dependency type.");
+      return failure();
+    }
 
     // Detect deps
     for (auto operand : operands) {
@@ -347,11 +394,12 @@ public:
       pushDepsAtCurrentScope(operand.memrefValue, async_op, dep_tracing_mode,
                              &operand);
     }
+    return success();
   }
 
   // Re-establish async dependency from an scf.for op to all other async ops in
   // the module.
-  void traceDependencyFromScfForOp(scf::ForOp &forOp);
+  LogicalResult traceDependencyFromScfForOp(scf::ForOp &forOp);
 
   // Recursively reconnect loop-carried dependency in scf loop nest
   void reconnectLoopCarriedDependencyFromOp(Operation *op);
@@ -365,7 +413,8 @@ public:
 
 private:
   // Trace the defining op of sink op, RAW
-  template <typename T> void traceDefiningOpAsDep(Value operand, T op) {
+  template <typename T>
+  void traceDefiningOpAsDep(Value operand, T op) {
     // Check memref deps
     if (auto defop = operand.getDefiningOp<air::ExecuteOp>()) {
       // addNewAsyncDepToGraph<T>(defop.getResult(0), op);
@@ -377,14 +426,9 @@ private:
   void pushDepsAtCurrentScope(mlir::Value operand, air::AsyncOpInterface op,
                               char rw = 'n', partialMemref *tile = nullptr);
 
-  // Create partial memref
-  partialMemref createPartialMemref(mlir::Value memrefValue, unsigned numDims);
-  partialMemref createPartialMemref(mlir::Value memrefValue, unsigned numDims,
-                                    SmallVector<Value, 2> memrefIndices);
-
   // Check if two partial memref tiles have identical indices
-  bool areEqualIndexPartialMemrefs(partialMemref *tile_0,
-                                   partialMemref *tile_1);
+  bool areOverlappingPartialMemrefs(partialMemref *tile_0,
+                                    partialMemref *tile_1);
 
   char checkOperandReadOrWrite(mlir::Value operand);
 

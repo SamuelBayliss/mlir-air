@@ -31,10 +31,16 @@ std::unique_ptr<mlir::Pass> createAIRLabelBroadcastChannelWithTilePass();
 std::unique_ptr<mlir::Pass> createAIRCollapseHerdPass();
 std::unique_ptr<mlir::Pass>
 createAIRCollapseHerdPass(AIRCollapseHerdPassOptions options);
+std::unique_ptr<mlir::Pass> createAIRFuseNestedHerdPass();
+std::unique_ptr<mlir::Pass>
+createAIRFuseNestedHerdPass(AIRFuseNestedHerdPassOptions options);
 std::unique_ptr<mlir::Pass> createAIRUnrollOuterPerfectlyNestedLoopsPass();
 std::unique_ptr<mlir::Pass> createAIRUnrollOuterPerfectlyNestedLoopsPass(
     AIRUnrollOuterPerfectlyNestedLoopsPassOptions options);
 std::unique_ptr<mlir::Pass> createAIRSplitL2MemrefForBufferConstraintPass();
+std::unique_ptr<Pass> createAIROverrideMemRefMemorySpacePass();
+std::unique_ptr<mlir::Pass> createAIROverrideMemRefMemorySpacePass(
+    AIROverrideMemRefMemorySpaceOptions options);
 
 } // namespace air
 } // namespace xilinx
