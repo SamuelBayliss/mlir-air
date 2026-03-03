@@ -379,4 +379,5 @@ module {
 ```
 -trace-size   : Trace buffer size for cores and memtiles (in bytes)
 -trace-offset : Trace buffer offset appended to ddr_id=2
+-output-elf   : Enable ELF output mode. When set, generates a main aie.device wrapper with configure/run ops.
 ```

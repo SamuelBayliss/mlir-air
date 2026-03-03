@@ -664,6 +664,12 @@ which is a direct child op of said scf.for, as candidate loop for ping-pong
 transformation. The label includes an attribute added to the child memref.alloc ops
 for subsequent hoisting, and an attribute added to the scf.for with an unroll factor.
 
+#### Options
+
+```
+-omit-memory-space : Omit ping-pong labeling for the specified memory space. Supported values: '', 'L1', 'L2'. Empty string means label all loops (default).
+```
+
 ### `-air-linalg-codegen`
 
 _AIR codegen strategies for linalg_
@@ -890,6 +896,43 @@ are lowered to loops using `linalg::LinalgLoweringPattern`.
 The transforms are biased toward aie.core regions and are intended
 to be run after the air-to-aie pass.
 
+### `-air-merge-unrolled-devices`
+
+_Merge unrolled segment devices back into a single device_
+
+This pass merges multiple aie.device operations that were created from
+segment unrolling back into a single aie.device. The tiles from each
+source device are offset horizontally based on their unroll index.
+
+The pass identifies related devices using the naming convention
+`{segment_name}_{unroll_x}_{unroll_y}` and the `segment_unroll_x/y`
+attributes, then:
+
+1. Computes the bounding box width of each source device based on device type
+2. Creates a merged device with the computed full device type
+3. Clones all ops, offsetting tile columns by (unroll_x * width)
+4. Merges the airrt.segment_metadata entries
+5. Removes the original unrolled device ops
+
+Example:
+
+Input:
+```mlir
+aie.device(npu2_4col) @segment_with_unroll_0_0 { ... tile(0,2) ... }
+aie.device(npu2_4col) @segment_with_unroll_1_0 { ... tile(0,2) ... }
+```
+
+Output:
+```mlir
+aie.device(npu2) @segment_with_unroll {
+  // From segment_with_unroll_0_0 (no offset)
+  %tile_0_2 = aie.tile(0, 2)  
+  // From segment_with_unroll_1_0 (offset by 4 columns)
+  %tile_4_2 = aie.tile(4, 2)
+  ...
+}
+```
+
 ### `-air-opt-memtile-dma-bds`
 
 _Optimize logical air.channel.put/get op into efficient AIE memtile dma block descriptor (BD)_
@@ -940,6 +983,7 @@ edges which represent a ping-pong buffering scheduling.
 
 ```
 -keep-memref-dealloc : Flag to keep memref dealloc ops after transformation. Memref dealloc is used in air-to-aie pass as handle to generate lock releases.
+-omit-memory-space   : Omit ping-pong transformation for the specified memory space. Supported values: '', 'L1', 'L2'. Empty string means apply ping-pong to all memory levels (default).
 ```
 
 ### `-air-pipeline-reduce`
