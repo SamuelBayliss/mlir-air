@@ -43,11 +43,25 @@ transform.with_pdl_patterns {
         // PHASE 2: Operation Preparation and Handle Splitting
         //===================================================================
         // Assumption: The softmax computation contains linalg.reduce operations
-        // that need to be generalized to linalg.generic for uniform handling.
+        // that need to be transformed and generalized for uniform handling.
         
-        // Convert linalg.reduce to linalg.generic for consistent processing
+        // Transform and convert linalg.reduce operations for consistent processing
+        // 1. First apply transpose_reduce transformation to optimize reduction patterns
+        // 2. Then generalize the transformed operations to linalg.generic for uniform handling
         %reduces = transform.structured.match ops{["linalg.reduce"]} in %arg1  : (!pdl.operation) -> !pdl.operation
-        %generalized_reduces = transform.structured.generalize %reduces  : (!pdl.operation) -> !pdl.operation
+        %transformed_reduces = transform.air.transpose_reduce %reduces
+        %generalized_reduces = transform.structured.generalize %transformed_reduces  : (!pdl.operation) -> !pdl.operation
+        
+        // Run canonicalization after transformation and generalization
+        // This additional canonicalization stage cleans up the IR after the transpose_reduce
+        // transformation and generalization, ensuring optimal patterns before fusion
+        %func1 = transform.structured.match ops{["func.func"]} in %arg1 : (!pdl.operation) -> !pdl.operation
+        transform.apply_patterns to %func1 {
+            transform.apply_patterns.linalg.tiling_canonicalization
+            transform.apply_patterns.scf.for_loop_canonicalization
+            transform.apply_patterns.canonicalization
+        } : !pdl.operation
+        transform.apply_cse to %func1 : !pdl.operation
 
         // Split operation handles for individual manipulation
         // Assumption: There are exactly 2 fill operations and 7 generic operations
@@ -61,9 +75,10 @@ transform.with_pdl_patterns {
         // PHASE 3: Initial Tiling and Fusion Strategy
         //===================================================================
         // Assumption: generic7 is the final output operation that should drive
-        // the tiling strategy. Memory space 1 likely represents L1 memory.
+        // the tiling strategy.
         
-        // Bufferize the final operation to L1 memory (memory_space = 1)
+        // Bufferize the final operation to L2 memory (memory_space = 1)
+        // Memory space mapping: 0=L3(DDR), 1=L2(Tile), 2=L1(Core)
         %generic7_output_buf, %new_generic7 = transform.structured.bufferize_to_allocation %generic7
           {memory_space = 1, bufferize_destination_only, emit_dealloc} : !pdl.operation
 
@@ -88,39 +103,39 @@ transform.with_pdl_patterns {
         // Clean up the IR after fusion to remove redundant operations
         
         // Run canonicalization after fusion
-        %func1 = transform.structured.match ops{["func.func"]} in %arg1 : (!pdl.operation) -> !pdl.operation
-        transform.apply_patterns to %func1 {
+        %func2 = transform.structured.match ops{["func.func"]} in %arg1 : (!pdl.operation) -> !pdl.operation
+        transform.apply_patterns to %func2 {
             transform.apply_patterns.linalg.tiling_canonicalization
             transform.apply_patterns.scf.for_loop_canonicalization
             transform.apply_patterns.canonicalization
         } : !pdl.operation
-        transform.apply_cse to %func1 : !pdl.operation
+        transform.apply_cse to %func2 : !pdl.operation
         
         //===================================================================
-        // PHASE 5: L2 Memory Allocation Strategy
+        // PHASE 5: L1 Memory Allocation Strategy
         //===================================================================
         // Assumption: After fusion, we need to allocate intermediate buffers
-        // in L2 memory (memory_space = 2) for efficient data movement.
-        // This phase targets specific operations that benefit from L2 caching.
+        // in L1 memory (memory_space = 2) for computation in AIE cores.
+        // Memory space mapping: 0=L3(DDR), 1=L2(Tile), 2=L1(Core)
         
-        // Allocate fill operations to L2 memory
+        // Allocate fill operations to L1 memory
         %fills_2 = transform.structured.match ops{["linalg.fill"]} in %arg1  : (!pdl.operation) -> !pdl.operation
         %fill1_buffer, %fill1_new = transform.structured.bufferize_to_allocation %fills_2
           {memory_space = 2, bufferize_destination_only, emit_dealloc} : !pdl.operation
 
-        // Re-split the fused generic operations for individual L2 allocation
+        // Re-split the fused generic operations for individual L1 allocation
         %generics2 = transform.structured.match ops{["linalg.generic"]} in %arg1  : (!pdl.operation) -> !pdl.operation
         %tiled_generic1, %tiled_generic2, %tiled_generic3, %tiled_generic4, %tiled_generic5, %tiled_generic6, %tiled_generic7 = transform.split_handle %generics2 : (!pdl.operation<"linalg.generic">) -> (!pdl.operation<"linalg.generic">, !pdl.operation<"linalg.generic">, !pdl.operation<"linalg.generic">, !pdl.operation<"linalg.generic">, !pdl.operation<"linalg.generic">, !pdl.operation<"linalg.generic">, !pdl.operation<"linalg.generic">)
 
-        // Allocate input producer to L2 memory for efficient data access
+        // Allocate input producer to L1 memory for efficient data access
         %padded_gen1_in = transform.get_producer_of_operand %tiled_generic1[0] : (!pdl.operation) -> (!pdl.operation)
         
         %padded_gen1_in_buffer, %padded_gen1_in_new = transform.structured.bufferize_to_allocation %padded_gen1_in
             {memory_space = 2, bufferize_destination_only, emit_dealloc} : !pdl.operation
 
-        // Allocate intermediate computation results to L2 memory
+        // Allocate intermediate computation results to L1 memory
         // Assumption: These operations produce intermediate results that need
-        // to be cached in L2 for subsequent operations in the softmax pipeline
+        // to be cached in L1 for subsequent operations in the softmax pipeline
         %padded_gen2_out1_buffer, %padded_gen2_out1_new = transform.structured.bufferize_to_allocation %tiled_generic2
             {memory_space = 2, bufferize_destination_only, emit_dealloc} : !pdl.operation
 
@@ -140,9 +155,9 @@ transform.with_pdl_patterns {
         //===================================================================
         // PHASE 6: Final Canonicalization and Bufferization
         //===================================================================
-        // Clean up the IR after L2 allocation and prepare for final bufferization
+        // Clean up the IR after L1 allocation and prepare for final bufferization
         
-        // Run canonicalization after L2 memory allocation
+        // Run canonicalization after L1 memory allocation
         %func5 = transform.structured.match ops{["func.func"]} in %arg1 : (!pdl.operation) -> !pdl.operation
         transform.apply_patterns to %func5 {
             transform.apply_patterns.linalg.tiling_canonicalization
@@ -199,5 +214,16 @@ transform.with_pdl_patterns {
         %math_exp_linalg = transform.get_parent_op %math_exp { op_name = "linalg.generic" } : (!pdl.operation) -> !pdl.operation
         %call = transform.air.linalg_to_library_call %math_exp_linalg { function_name = "exp_vec16_f32", link_with = "extern_func.o" } : (!pdl.operation) -> !pdl.operation
 
+        //===================================================================
+        // PHASE 10: AIR Constructs Mapping
+        //===================================================================
+        // Convert parallel loops to AIE herd operations for multi-core execution
+        %forall_as_herd = transform.structured.match ops{["scf.forall"]} in %arg1 : (!pdl.operation) -> !pdl.operation
+        %parallel = transform.loop.forall_to_parallel %forall_as_herd  : (!pdl.operation) -> !pdl.operation
+        %herd = transform.air.par_to_herd %parallel
+
+        // Convert memory copies to DMA operations for efficient data movement
+        %copies_in_herd = transform.structured.match ops{["memref.copy", "linalg.copy"]} in %herd : (!pdl.operation) -> !pdl.operation
+        %dmas_from_copies = transform.air.copy_to_dma %copies_in_herd
     }
 }

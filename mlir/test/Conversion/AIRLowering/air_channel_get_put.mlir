@@ -61,7 +61,7 @@ module {
 // CHECK: airrt.segment_load "segment_0" : i64
 // CHECK: airrt.dma_memcpy_nd(%c3_i32, %{{.*}}, %{{.*}}, %arg0[%{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}], [%{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}], [%{{.*}}, %{{.*}}, %{{.*}}]) : (i32, i64, i64, memref<32x16xi32>, [i64, i64, i64, i64], [i64, i64, i64, i64], [i64, i64, i64])
 // CHECK: airrt.dma_memcpy_nd(%c4_i32, %{{.*}}, %{{.*}}, %arg1[%{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}], [%{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}], [%{{.*}}, %{{.*}}, %{{.*}}]) : (i32, i64, i64, memref<32x16xi32>, [i64, i64, i64, i64], [i64, i64, i64, i64], [i64, i64, i64])
-// CHECK: airrt.herd_load "herd_0" () : () -> i64
+// CHECK: airrt.herd_load "herd_0" () {segment_name = "segment_0"} : () -> i64
 
 module {
   air.channel @channel_3 [2, 2]
@@ -130,7 +130,7 @@ module {
 // CHECK:     scf.for
 // CHECK:       airrt.dma_memcpy_nd(%{{.*}}, %{{.*}}, %{{.*}}, %arg1[%{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}], [%{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}], [%{{.*}}, %{{.*}}, %{{.*}}]) : (i32, i64, i64, memref<32x16xi32>, [i64, i64, i64, i64], [i64, i64, i64, i64], [i64, i64, i64])
 // CHECK:       scf.yield
-// CHECK: airrt.herd_load "herd_0" () : () -> i64
+// CHECK: airrt.herd_load "herd_0" () {segment_name = "segment_0"} : () -> i64
 module {
   air.channel @channel_5 [2, 2]
   air.channel @channel_4 [2, 2]
@@ -200,7 +200,7 @@ module {
 // CHECK: affine.for
 // CHECK: airrt.segment_load "segment_0" : i64
 // CHECK: airrt.dma_memcpy_nd(%{{.*}}, %{{.*}}, %{{.*}}, %arg0[%{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}], [%{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}], [%{{.*}}, %{{.*}}, %{{.*}}]) : (i32, i64, i64, memref<128xf32>, [i64, i64, i64, i64], [i64, i64, i64, i64], [i64, i64, i64]) : !airrt.event
-// CHECK: airrt.herd_load "herd_0" () : () -> i64
+// CHECK: airrt.herd_load "herd_0" () {segment_name = "segment_0"} : () -> i64
 
 #map = affine_map<(d0)[] -> (d0 * 64)>
 module {
@@ -314,22 +314,16 @@ module {
 
 module {
   aie.device(npu1) {
-    aie.shim_dma_allocation @air_channel_1_0(S2MM, 0, 0)
-    memref.global "public" @air_channel_1_0 : memref<4x2xf32, 2 : i32>
-    aie.shim_dma_allocation @air_channel_1_1(S2MM, 1, 0)
-    memref.global "public" @air_channel_1_1 : memref<4x2xf32, 2 : i32>
-    aie.shim_dma_allocation @air_channel_1_2(S2MM, 0, 1)
-    memref.global "public" @air_channel_1_2 : memref<4x2xf32, 2 : i32>
-    aie.shim_dma_allocation @air_channel_1_3(S2MM, 1, 1)
-    memref.global "public" @air_channel_1_3 : memref<4x2xf32, 2 : i32>
-    aie.shim_dma_allocation @air_channel_0_0(MM2S, 0, 0)
-    memref.global "public" @air_channel_0_0 : memref<4x2xf32, 2 : i32>
-    aie.shim_dma_allocation @air_channel_0_1(MM2S, 1, 0)
-    memref.global "public" @air_channel_0_1 : memref<4x2xf32, 2 : i32>
-    aie.shim_dma_allocation @air_channel_0_2(MM2S, 0, 1)
-    memref.global "public" @air_channel_0_2 : memref<4x2xf32, 2 : i32>
-    aie.shim_dma_allocation @air_channel_0_3(MM2S, 1, 1)
-    memref.global "public" @air_channel_0_3 : memref<4x2xf32, 2 : i32>
+    %shim_noc_tile_0_0 = aie.tile(0, 0)
+    %shim_noc_tile_1_0 = aie.tile(1, 0)
+    aie.shim_dma_allocation @air_channel_1_0(%shim_noc_tile_0_0, S2MM, 0)
+    aie.shim_dma_allocation @air_channel_1_1(%shim_noc_tile_0_0, S2MM, 1)
+    aie.shim_dma_allocation @air_channel_1_2(%shim_noc_tile_1_0, S2MM, 0)
+    aie.shim_dma_allocation @air_channel_1_3(%shim_noc_tile_1_0, S2MM, 1)
+    aie.shim_dma_allocation @air_channel_0_0(%shim_noc_tile_0_0, MM2S, 0)
+    aie.shim_dma_allocation @air_channel_0_1(%shim_noc_tile_0_0, MM2S, 1)
+    aie.shim_dma_allocation @air_channel_0_2(%shim_noc_tile_1_0, MM2S, 0)
+    aie.shim_dma_allocation @air_channel_0_3(%shim_noc_tile_1_0, MM2S, 1)
   } {sym_name = "herd_0"}
   air.channel @channel_0 [2, 2]
   air.channel @channel_1 [2, 2]

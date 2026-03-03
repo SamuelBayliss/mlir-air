@@ -7,23 +7,28 @@
 
 // RUN: air-opt -airrt-to-npu -canonicalize -cse --split-input-file %s | FileCheck %s
 
-// Converts AIEX.npu.dma_memcpy_nd src/dst memref to function params.
+// Converts AIEX dma_configure_task_for src/dst memref to function params.
 
 // CHECK-LABEL: aie.device(npu1_1col)
-// CHECK: aiex.runtime_sequence @func0(%[[VAL_0:.*]]: memref<8x16xi32>, %[[VAL_1:.*]]: memref<16x8xi32>, %[[VAL_2:.*]]: memref<8x8xi32>) {
-// CHECK:   aiex.npu.dma_memcpy_nd(%[[VAL_0]][0, 0, 0, 0][1, 1, 8, 16][0, 0, 16, 1]) {id = 0 : i64, metadata = @airMemcpyId4} : memref<8x16xi32>
-// CHECK:   aiex.npu.dma_memcpy_nd(%[[VAL_1]][0, 0, 0, 0][1, 1, 16, 8][0, 0, 8, 1]) {id = 1 : i64, metadata = @airMemcpyId4} : memref<16x8xi32>
-// CHECK:   aiex.npu.dma_memcpy_nd(%[[VAL_2]][0, 0, 0, 0][1, 1, 8, 8][0, 0, 8, 1]) {id = 2 : i64, metadata = @airMemcpyId16} : memref<8x8xi32>
+// CHECK: aie.runtime_sequence @func0(%[[VAL_0:.*]]: memref<8x16xi32>, %[[VAL_1:.*]]: memref<16x8xi32>, %[[VAL_2:.*]]: memref<8x8xi32>) {
+// CHECK:   aiex.dma_configure_task_for @airMemcpyId4 {
+// CHECK:     aie.dma_bd(%[[VAL_0]] : memref<8x16xi32>, 0, 128
+// CHECK:   aiex.dma_start_task
+// CHECK:   aiex.dma_configure_task_for @airMemcpyId4 {
+// CHECK:     aie.dma_bd(%[[VAL_1]] : memref<16x8xi32>, 0, 128
+// CHECK:   aiex.dma_start_task
+// CHECK:   %[[T2:.*]] = aiex.dma_configure_task_for @airMemcpyId16 {
+// CHECK:     aie.dma_bd(%[[VAL_2]] : memref<8x8xi32>, 0, 64
+// CHECK:   } {issue_token = true}
+// CHECK:   aiex.dma_start_task(%[[T2]])
 
 #map = affine_map<(d0)[] -> (d0 * 8)>
 module {
   aie.device(npu1_1col) {
-    aie.shim_dma_allocation @airMemcpyId16(S2MM, 0, 0)
-    memref.global "public" @airMemcpyId16 : memref<8x8xi32, 1>
-    aie.shim_dma_allocation @airMemcpyId4(MM2S, 0, 0)
-    memref.global "public" @airMemcpyId4 : memref<8x16xi32, 1>
-    aie.shim_dma_allocation @airMemcpyId5(MM2S, 0, 0)
-    memref.global "public" @airMemcpyId5 : memref<16x8xi32, 1>
+    %shim_noc_tile_0_0 = aie.tile(0, 0)
+    aie.shim_dma_allocation @airMemcpyId16(%shim_noc_tile_0_0, S2MM, 0)
+    aie.shim_dma_allocation @airMemcpyId4(%shim_noc_tile_0_0, MM2S, 0)
+    aie.shim_dma_allocation @airMemcpyId5(%shim_noc_tile_0_0, MM2S, 0)
   } {sym_name = "segment_0"}
   func.func @func0(%arg0: memref<8x16xi32>, %arg1: memref<16x8xi32>, %arg2: memref<8x8xi32>) {
     %c8_i64 = arith.constant 8 : i64
@@ -56,20 +61,25 @@ module {
 // -----
 
 // CHECK-LABEL: aie.device(npu1_1col)
-// CHECK: aiex.runtime_sequence @func1(%[[VAL_0:.*]]: memref<8x16xi32>, %[[VAL_1:.*]]: memref<16x8xi32>, %[[VAL_2:.*]]: memref<8x8xi32>) {
-// CHECK:   aiex.npu.dma_memcpy_nd(%[[VAL_0]][0, 0, 0, 0][1, 1, 8, 16][0, 0, 16, 1]) {id = 0 : i64, metadata = @airMemcpyId4} : memref<8x16xi32>
-// CHECK:   aiex.npu.dma_memcpy_nd(%[[VAL_1]][0, 0, 0, 0][1, 1, 16, 8][0, 0, 8, 1]) {id = 1 : i64, metadata = @airMemcpyId4} : memref<16x8xi32>
-// CHECK:   aiex.npu.dma_memcpy_nd(%[[VAL_2]][0, 0, 0, 0][1, 1, 8, 8][0, 0, 8, 1]) {id = 2 : i64, metadata = @airMemcpyId16} : memref<8x8xi32>
+// CHECK: aie.runtime_sequence @func1(%[[VAL_0:.*]]: memref<8x16xi32>, %[[VAL_1:.*]]: memref<16x8xi32>, %[[VAL_2:.*]]: memref<8x8xi32>) {
+// CHECK:   aiex.dma_configure_task_for @airMemcpyId4 {
+// CHECK:     aie.dma_bd(%[[VAL_0]] : memref<8x16xi32>, 0, 128
+// CHECK:   aiex.dma_start_task
+// CHECK:   aiex.dma_configure_task_for @airMemcpyId4 {
+// CHECK:     aie.dma_bd(%[[VAL_1]] : memref<16x8xi32>, 0, 128
+// CHECK:   aiex.dma_start_task
+// CHECK:   %[[T2:.*]] = aiex.dma_configure_task_for @airMemcpyId16 {
+// CHECK:     aie.dma_bd(%[[VAL_2]] : memref<8x8xi32>, 0, 64
+// CHECK:   } {issue_token = true}
+// CHECK:   aiex.dma_start_task(%[[T2]])
 
 #map = affine_map<(d0)[] -> (d0 * 8)>
 module {
   aie.device(npu1_1col) {
-    aie.shim_dma_allocation @airMemcpyId16(S2MM, 0, 0)
-    memref.global "public" @airMemcpyId16 : memref<8x8xi32, 1>
-    aie.shim_dma_allocation @airMemcpyId4(MM2S, 0, 0)
-    memref.global "public" @airMemcpyId4 : memref<8x16xi32, 1>
-    aie.shim_dma_allocation @airMemcpyId5(MM2S, 0, 0)
-    memref.global "public" @airMemcpyId5 : memref<16x8xi32, 1>
+    %shim_noc_tile_0_0 = aie.tile(0, 0)
+    aie.shim_dma_allocation @airMemcpyId16(%shim_noc_tile_0_0, S2MM, 0)
+    aie.shim_dma_allocation @airMemcpyId4(%shim_noc_tile_0_0, MM2S, 0)
+    aie.shim_dma_allocation @airMemcpyId5(%shim_noc_tile_0_0, MM2S, 0)
   } {sym_name = "segment_0"}
   func.func @func1() {
     %c8_i64 = arith.constant 8 : i64
@@ -117,23 +127,26 @@ module {
 // Bf16 datatype support.
 
 // CHECK-LABEL: aie.device(npu1_1col)
-// CHECK: aiex.runtime_sequence @func2(%[[VAL_0:.*]]: memref<2048x2048xbf16>, %[[VAL_1:.*]]: memref<2048x2048xbf16>, %[[VAL_2:.*]]: memref<2048x2048xbf16>) {
-// CHECK:   aiex.npu.dma_memcpy_nd(%[[VAL_0]][0, 0, 0, 0][1, 8, 128, 256][0, 256, 2048, 1]) {id = 0 : i64, metadata = @airMemcpyId4} : memref<2048x2048xbf16>
-// CHECK:   aiex.npu.dma_memcpy_nd(%[[VAL_1]][0, 0, 0, 0][1, 4, 512, 128][0, 1048576, 2048, 1]) {id = 1 : i64, metadata = @airMemcpyId7} : memref<2048x2048xbf16>
-// CHECK:   aiex.npu.dma_memcpy_nd(%[[VAL_2]][0, 0, 0, 0][1, 1, 128, 128][0, 0, 2048, 1]) {id = 2 : i64, metadata = @airMemcpyId26} : memref<2048x2048xbf16>
+// CHECK: aie.runtime_sequence @func2(%[[VAL_0:.*]]: memref<2048x2048xbf16>, %[[VAL_1:.*]]: memref<2048x2048xbf16>, %[[VAL_2:.*]]: memref<2048x2048xbf16>) {
+// CHECK:   aiex.dma_configure_task_for @airMemcpyId4 {
+// CHECK:     aie.dma_bd(%[[VAL_0]] : memref<2048x2048xbf16>, 0, 262144
+// CHECK:   aiex.dma_start_task
+// CHECK:   aiex.dma_configure_task_for @airMemcpyId7 {
+// CHECK:     aie.dma_bd(%[[VAL_1]] : memref<2048x2048xbf16>, 0, 262144
+// CHECK:   aiex.dma_start_task
+// CHECK:   %[[T2:.*]] = aiex.dma_configure_task_for @airMemcpyId26 {
+// CHECK:     aie.dma_bd(%[[VAL_2]] : memref<2048x2048xbf16>, 0, 16384
+// CHECK:   } {issue_token = true}
+// CHECK:   aiex.dma_start_task(%[[T2]])
 
 module {
   aie.device(npu1_1col) {
-    aie.shim_dma_allocation @airMemcpyId26(S2MM, 0, 0)
-    memref.global "public" @airMemcpyId26 : memref<128x128xbf16, 1 : i32>
-    aie.shim_dma_allocation @airMemcpyId4(MM2S, 0, 0)
-    memref.global "public" @airMemcpyId4 : memref<128x256xbf16, 1 : i32>
-    aie.shim_dma_allocation @airMemcpyId10(MM2S, 0, 0)
-    memref.global "public" @airMemcpyId10 : memref<128x256xbf16, 1 : i32>
-    aie.shim_dma_allocation @airMemcpyId7(MM2S, 1, 0)
-    memref.global "public" @airMemcpyId7 : memref<256x128xbf16, 1 : i32>
-    aie.shim_dma_allocation @airMemcpyId13(MM2S, 1, 0)
-    memref.global "public" @airMemcpyId13 : memref<256x128xbf16, 1 : i32>
+    %shim_noc_tile_0_0 = aie.tile(0, 0)
+    aie.shim_dma_allocation @airMemcpyId26(%shim_noc_tile_0_0, S2MM, 0)
+    aie.shim_dma_allocation @airMemcpyId4(%shim_noc_tile_0_0, MM2S, 0)
+    aie.shim_dma_allocation @airMemcpyId10(%shim_noc_tile_0_0, MM2S, 0)
+    aie.shim_dma_allocation @airMemcpyId7(%shim_noc_tile_0_0, MM2S, 1)
+    aie.shim_dma_allocation @airMemcpyId13(%shim_noc_tile_0_0, MM2S, 1)
   } {sym_name = "segment_0"}
   func.func @func2() {
     %c128_i64 = arith.constant 128 : i64

@@ -142,6 +142,9 @@ add_dependencies(air-headers mlir-headers)
 add_custom_target(docs ALL)
 add_dependencies(docs mlir-doc)
 
+# Check if Python bindings should be enabled (defaults to ON if not specified)
+option(AIE_ENABLE_BINDINGS_PYTHON "Enable building of Python bindings." ON)
+
 set(AIR_RUNTIME_TARGETS
     ""
     CACHE STRING "Architectures to compile the runtime libraries for.")

@@ -59,7 +59,7 @@ class XRTRunner:
         self,
         verbose: bool = False,
         omit_while_true_loop: bool = True,
-        omit_pingpong: bool = False,
+        omit_pingpong: str = "",
         lower_linalg_to_func: bool = False,
         air_loop_fusion: bool = False,
         runtime_loop_tiling_sizes: list[int] = [4, 4],
@@ -73,12 +73,15 @@ class XRTRunner:
         instance_name: str = "",
         kernel_id: str = "",
         xclbin_input: str = "",
+        trace_file: str = "trace_data.txt",
+        num_device_cols: int = 0,
+        debug_ir: bool = False,
     ):
         """
         Args:
             verbose: verbose output
             omit_while_true_loop: configure aircc to omit the while true loop it traditionally emits.
-            omit_pingpong: configure aircc to omit the generation of ping-pong buffering.
+            omit_pingpong: configure aircc to omit the generation of ping-pong buffering for specific memory levels. Supported values: "", "L1", "L2", "all". Empty string means no omission (default).
             lower_linalg_to_func: configure aircc to lower linalg.generic to function calls, or loops.
             air_loop_fusion: configure aircc to add air-loop-fusion experimental pass.
             runtime_loop_tiling_sizes: configure aircc to add extra runtime loop tiling using the experimental affine-loop-opt pass.
@@ -87,15 +90,25 @@ class XRTRunner:
             use_lock_race_condition_fix: configure aircc to enable a fix for lock race condition which protects against race condition.
             trace_offset: configure aircc to stream out profiling traces at outputs, starting from the specified offset.
             trace_size: configure aircc to stream out profiling traces at outputs, with specified trace data size.
-            output_format: configure aircc to produce output binary in to one of the following formats: [xclbin, txn].
+            output_format: configure aircc to produce output binary in to one of the following formats: [xclbin, txn, elf].
             kernel_name: configure aircc to package the kernel with the specified name.
             instance_name: configure aircc to package the kernel with specified instance name in xclbin metadata.
             kernel_id: configure aircc to package the kernel with specified kernel id in xclbin file.
             xclbin_input: configure aircc to package the kernel into an existing xclbin with specified xclbin file name.
+            trace_file: default filename for saving trace data.
+            num_device_cols: number of device columns to confine the design within (0 means entire device, default).
+                For npu1 (4 columns total): valid values are 0 (entire device), 1, 2, 3
+                For npu2 (8 columns total): valid values are 0 (entire device), 1, 2, 3, 4, 5, 6, 7
+            debug_ir: enable debug mode to emit IR after each individual pass for fine-grained inspection.
+                IRs are saved to <tmpdir>/debug_ir/ with sequence numbers.
         """
         self.verbose = verbose
         self.omit_while_true_loop = omit_while_true_loop
-        self.omit_pingpong = omit_pingpong
+        # Support backward compatibility: convert True to "all", False to ""
+        if isinstance(omit_pingpong, bool):
+            self.omit_pingpong = "all" if omit_pingpong else ""
+        else:
+            self.omit_pingpong = omit_pingpong
         self.lower_linalg_to_func = lower_linalg_to_func
         self.air_loop_fusion = air_loop_fusion
         self.runtime_loop_tiling_sizes = runtime_loop_tiling_sizes
@@ -109,6 +122,9 @@ class XRTRunner:
         self.instance_name = instance_name
         self.kernel_id = kernel_id
         self.xclbin_input = xclbin_input
+        self.trace_file = trace_file
+        self.num_device_cols = num_device_cols
+        self.debug_ir = debug_ir
 
     def run_test(
         self,
@@ -117,6 +133,8 @@ class XRTRunner:
         expected_outputs: List[np.ndarray] = [],
         stochastic_expected_outputs: List[np.ndarray] = [],
         rtol: float = 1e-3,
+        atol: float = 1e-8,
+        trace_file: str = None,
     ):
         """
         Args:
@@ -125,6 +143,8 @@ class XRTRunner:
             expected_outputs: expected output matrices.
             stochastic_expected_outputs: expected output matrices stored in sparse coordinates. Expect each matrix to be a dictionary containing "shape", "indices" and "values" fields.
             rtol: relative error tolerance.
+            atol: absolute error tolerance.
+            trace_file: optional override for trace data filename. If None, uses instance default.
         """
         if self.verbose:
             print("Running module: ")
@@ -139,7 +159,7 @@ class XRTRunner:
             runtime_loop_tiling_sizes=self.runtime_loop_tiling_sizes,
             omit_auto_broadcast=self.omit_auto_broadcast,
             channel_multiplexing=self.channel_multiplexing,
-            use_lock_race_condition_fix = self.use_lock_race_condition_fix,
+            use_lock_race_condition_fix=self.use_lock_race_condition_fix,
             trace_offset=self.trace_offset,
             trace_size=self.trace_size,
             output_format=self.output_format,
@@ -147,22 +167,80 @@ class XRTRunner:
             instance_name=self.instance_name,
             kernel_id=self.kernel_id,
             xclbin_input=self.xclbin_input,
+            num_device_cols=self.num_device_cols,
+            debug_ir=self.debug_ir,
         )
 
+        # Use per-test trace file if provided, otherwise use instance default
+        active_trace_file = trace_file if trace_file is not None else self.trace_file
+
         # run the module - slots are input/output for now, assume non-overlapping inputs/outputs
-        if expected_outputs:
-            expanded_inputs = inputs + [
-                np.zeros(o.shape, o.dtype) for o in expected_outputs
-            ]
-        elif stochastic_expected_outputs:
-            expanded_inputs = inputs + [
-                np.zeros(o["shape"], o["values"][0].dtype)
-                for o in stochastic_expected_outputs
-            ]
+        # Handle different scenarios for trace data
+        if self.trace_size > 0:
+            if expected_outputs:
+                # Case 1: Both outputs and trace
+                # Add trace_size bytes to first output
+                total_bytes = expected_outputs[0].nbytes + self.trace_size
+                first_output_with_trace = np.zeros(total_bytes, dtype=np.uint8)
+                remaining_outputs = [
+                    np.zeros(o.shape, o.dtype) for o in expected_outputs[1:]
+                ]
+                output_placeholders = [first_output_with_trace] + remaining_outputs
+                if self.verbose:
+                    print(
+                        f"Allocated {total_bytes} bytes for first output + {self.trace_size} bytes for trace data"
+                    )
+                # Record the expected_outputs[0]'s shape and dtype, to be used to split actual outputs from trace.
+                expected_outputs_0_shape = expected_outputs[0].shape
+                expected_outputs_0_dtype = expected_outputs[0].dtype
+            elif stochastic_expected_outputs:
+                # Case 2: Stochastic outputs and trace
+                first_output_elements = np.prod(stochastic_expected_outputs[0]["shape"])
+                first_output_bytes = (
+                    first_output_elements
+                    * stochastic_expected_outputs[0]["values"][0].dtype.itemsize
+                )
+                total_bytes = first_output_bytes + self.trace_size
+                first_output_with_trace = np.zeros(total_bytes, dtype=np.uint8)
+                remaining_outputs = [
+                    np.zeros(o["shape"], o["values"][0].dtype)
+                    for o in stochastic_expected_outputs[1:]
+                ]
+                output_placeholders = [first_output_with_trace] + remaining_outputs
+                if self.verbose:
+                    print(
+                        f"Allocated {first_output_bytes} bytes for first stochastic output + {self.trace_size} bytes for trace data"
+                    )
+                # Record the expected_outputs[0]'s shape and dtype, to be used to split actual outputs from trace.
+                expected_outputs_0_shape = stochastic_expected_outputs[0]["shape"]
+                expected_outputs_0_dtype = stochastic_expected_outputs[0][
+                    "values"
+                ].dtype
+            else:
+                # Case 3: Trace only, no expected outputs
+                trace_only_output = np.zeros(self.trace_size, dtype=np.uint8)
+                output_placeholders = [trace_only_output]
+                if self.verbose:
+                    print(
+                        f"Trace-only mode: allocated {self.trace_size} bytes for trace data"
+                    )
         else:
-            assert (
-                False
-            ), f"Expect one of 'expected_outputs' and 'stochastic_expected_outputs' to not be empty."
+            # Case 4: No trace, original behavior
+            if expected_outputs:
+                output_placeholders = [
+                    np.zeros(o.shape, o.dtype) for o in expected_outputs
+                ]
+            elif stochastic_expected_outputs:
+                output_placeholders = [
+                    np.zeros(o["shape"], o["values"][0].dtype)
+                    for o in stochastic_expected_outputs
+                ]
+            else:
+                assert (
+                    False
+                ), f"Expect one of 'expected_outputs' and 'stochastic_expected_outputs' to not be empty, or trace_size > 0."
+
+        expanded_inputs = inputs + output_placeholders
 
         compiled_module = backend.compile(mlir_module)
         with filelock.FileLock("/tmp/npu.lock"):
@@ -171,31 +249,69 @@ class XRTRunner:
 
         backend.unload()
 
-        # Remove input slots from the received outputs
-        actual_outputs = actual_outputs[len(inputs) :]
+        # Remove input slots from the received outputs first
+        actual_outputs = list(actual_outputs[len(inputs) :])
 
-        if expected_outputs:
+        # Handle trace data extraction and saving
+        if self.trace_size > 0:
+            # Import trace utilities only when needed for trace handling
+            try:
+                from aie.utils import TraceConfig, HostRuntime
+            except ImportError:
+                raise AirBackendError(
+                    "Trace utilities (aie.utils) are not available. "
+                    "Trace functionality requires mlir-aie to be installed. "
+                    "Install mlir-aie to use trace_size parameter."
+                )
+
+            actual_outputs[0], trace = HostRuntime._extract_prefix(
+                actual_outputs[0],
+                expected_outputs_0_shape,
+                expected_outputs_0_dtype,
+            )
+            trace = trace.view(np.uint32).reshape(self.trace_size // 4)
+            trace_config = TraceConfig(
+                trace_size=self.trace_size, trace_file=active_trace_file
+            )
+            trace_config.write_trace(trace)
+
+            print(f"Trace data ({self.trace_size} bytes) saved to {active_trace_file}")
+
+        # Perform result checking only if we have expected outputs
+        if expected_outputs and actual_outputs:
             if self._check_outputs(
                 actual_outputs=actual_outputs,
                 expected_outputs=expected_outputs,
                 rtol=rtol,
+                atol=atol,
             ):
                 print("PASS!")
                 return_code = 0
             else:
                 print("failed.")
                 return_code = -1
-        elif stochastic_expected_outputs:
+        elif stochastic_expected_outputs and actual_outputs:
             if self._check_outputs_stochastic(
                 actual_outputs=actual_outputs,
                 stochastic_expected_outputs=stochastic_expected_outputs,
                 rtol=rtol,
+                atol=atol,
             ):
                 print("PASS!")
                 return_code = 0
             else:
                 print("failed.")
                 return_code = -1
+        elif self.trace_size > 0 and not (
+            expected_outputs or stochastic_expected_outputs
+        ):
+            # Trace-only case
+            print("Trace data extracted successfully!")
+            return_code = 0
+        else:
+            print("No outputs to validate.")
+            return_code = 0
+
         return return_code
 
     def _check_outputs(
@@ -203,6 +319,7 @@ class XRTRunner:
         actual_outputs: List[np.ndarray],
         expected_outputs: List[np.ndarray],
         rtol: float = 1e-3,
+        atol: float = 1e-8,
     ):
         assert len(actual_outputs) == len(
             expected_outputs
@@ -228,20 +345,68 @@ class XRTRunner:
                 if expected.dtype == bfloat16:
                     expected = expected.astype(np.float64)
                     actual = actual.astype(np.float64)
-                if not np.allclose(actual, expected, rtol=rtol):
+                if not np.allclose(actual, expected, rtol=rtol, atol=atol):
                     print(f"ERROR: Output {i} does not meet expected output.")
-                    print("Expected: ")
-                    print(expected)
-                    print("Actual: ")
-                    print(actual)
+                    # Find mismatched elements
+                    close_mask = np.isclose(actual, expected, rtol=rtol, atol=atol)
+                    mismatch_indices = np.where(~close_mask)
+                    num_mismatches = len(mismatch_indices[0])
+                    total_elements = expected.size
+                    print(f"Shape: {expected.shape}")
+                    if total_elements > 0:
+                        print(
+                            f"Mismatches: {num_mismatches} / {total_elements} elements ({100*num_mismatches/total_elements:.2f}%)"
+                        )
+                    else:
+                        print(
+                            f"Mismatches: {num_mismatches} / {total_elements} elements (empty array)"
+                        )
+                    # Show first N mismatches
+                    max_display = 20
+                    print(
+                        f"First {min(max_display, num_mismatches)} mismatched locations:"
+                    )
+                    for j in range(min(max_display, num_mismatches)):
+                        idx = tuple(dim[j] for dim in mismatch_indices)
+                        print(
+                            f"  Index {idx}: expected={expected[idx]}, actual={actual[idx]}, diff={abs(actual[idx] - expected[idx])}"
+                        )
+                    if num_mismatches > max_display:
+                        print(
+                            f"  ... and {num_mismatches - max_display} more mismatches"
+                        )
                     return False
             else:
                 if not np.array_equal(actual, expected):
                     print(f"ERROR: Output {i} does not meet expected output.")
-                    print("Expected: ")
-                    print(expected)
-                    print("Actual: ")
-                    print(actual)
+                    # Find mismatched elements
+                    mismatch_mask = actual != expected
+                    mismatch_indices = np.where(mismatch_mask)
+                    num_mismatches = len(mismatch_indices[0])
+                    total_elements = expected.size
+                    print(f"Shape: {expected.shape}")
+                    if total_elements > 0:
+                        print(
+                            f"Mismatches: {num_mismatches} / {total_elements} elements ({100*num_mismatches/total_elements:.2f}%)"
+                        )
+                    else:
+                        print(
+                            f"Mismatches: {num_mismatches} / {total_elements} elements (empty array)"
+                        )
+                    # Show first N mismatches
+                    max_display = 20
+                    print(
+                        f"First {min(max_display, num_mismatches)} mismatched locations:"
+                    )
+                    for j in range(min(max_display, num_mismatches)):
+                        idx = tuple(dim[j] for dim in mismatch_indices)
+                        print(
+                            f"  Index {idx}: expected={expected[idx]}, actual={actual[idx]}"
+                        )
+                    if num_mismatches > max_display:
+                        print(
+                            f"  ... and {num_mismatches - max_display} more mismatches"
+                        )
                     return False
 
         return True
@@ -251,6 +416,7 @@ class XRTRunner:
         actual_outputs: List[np.ndarray],
         stochastic_expected_outputs: List[np.ndarray],
         rtol: float = 1e-3,
+        atol: float = 1e-8,
     ):
         assert len(actual_outputs) == len(
             stochastic_expected_outputs
@@ -286,21 +452,79 @@ class XRTRunner:
                     expected["values"] = expected["values"].astype(np.float64)
                     actual = actual.astype(np.float64)
                 actual_stochastic = actual[tuple(expected["indices"])]
-                if not np.allclose(actual_stochastic, expected["values"], rtol=rtol):
+                if not np.allclose(
+                    actual_stochastic, expected["values"], rtol=rtol, atol=atol
+                ):
                     print(f"ERROR: Output {i} does not meet expected output.")
-                    print("Expected: ")
-                    print(expected["values"])
-                    print("Actual: ")
-                    print(actual_stochastic)
+                    # Find mismatched elements
+                    close_mask = np.isclose(
+                        actual_stochastic, expected["values"], rtol=rtol, atol=atol
+                    )
+                    mismatch_positions = np.where(~close_mask)[0]
+                    num_mismatches = len(mismatch_positions)
+                    total_elements = len(expected["values"])
+                    print(f"Shape: {expected['shape']}")
+                    print(f"Stochastic check: {total_elements} sampled elements")
+                    if total_elements > 0:
+                        print(
+                            f"Mismatches: {num_mismatches} / {total_elements} elements ({100*num_mismatches/total_elements:.2f}%)"
+                        )
+                    else:
+                        print(
+                            f"Mismatches: {num_mismatches} / {total_elements} elements (empty array)"
+                        )
+                    # Show first N mismatches
+                    max_display = 20
+                    print(
+                        f"First {min(max_display, num_mismatches)} mismatched locations:"
+                    )
+                    for j in range(min(max_display, num_mismatches)):
+                        pos = mismatch_positions[j]
+                        idx = tuple(dim[pos] for dim in expected["indices"])
+                        exp_val = expected["values"][pos]
+                        act_val = actual_stochastic[pos]
+                        print(
+                            f"  Index {idx}: expected={exp_val}, actual={act_val}, diff={abs(act_val - exp_val)}"
+                        )
+                    if num_mismatches > max_display:
+                        print(
+                            f"  ... and {num_mismatches - max_display} more mismatches"
+                        )
                     return False
             else:
                 actual_stochastic = actual[tuple(expected["indices"])]
                 if not np.array_equal(actual_stochastic, expected["values"]):
                     print(f"ERROR: Output {i} does not meet expected output.")
-                    print("Expected: ")
-                    print(expected["values"])
-                    print("Actual: ")
-                    print(actual_stochastic)
+                    # Find mismatched elements
+                    mismatch_mask = actual_stochastic != expected["values"]
+                    mismatch_positions = np.where(mismatch_mask)[0]
+                    num_mismatches = len(mismatch_positions)
+                    total_elements = len(expected["values"])
+                    print(f"Shape: {expected['shape']}")
+                    print(f"Stochastic check: {total_elements} sampled elements")
+                    if total_elements > 0:
+                        print(
+                            f"Mismatches: {num_mismatches} / {total_elements} elements ({100*num_mismatches/total_elements:.2f}%)"
+                        )
+                    else:
+                        print(
+                            f"Mismatches: {num_mismatches} / {total_elements} elements (empty array)"
+                        )
+                    # Show first N mismatches
+                    max_display = 20
+                    print(
+                        f"First {min(max_display, num_mismatches)} mismatched locations:"
+                    )
+                    for j in range(min(max_display, num_mismatches)):
+                        pos = mismatch_positions[j]
+                        idx = tuple(dim[pos] for dim in expected["indices"])
+                        exp_val = expected["values"][pos]
+                        act_val = actual_stochastic[pos]
+                        print(f"  Index {idx}: expected={exp_val}, actual={act_val}")
+                    if num_mismatches > max_display:
+                        print(
+                            f"  ... and {num_mismatches - max_display} more mismatches"
+                        )
                     return False
 
         return True

@@ -17,5 +17,3 @@ source sandbox/bin/activate
 # Install essential python packages
 python3 -m pip install --upgrade pip
 python3 -m pip install -r utils/requirements.txt
-# Install python packages needed by MLIR-AIE's python bindings
-HOST_MLIR_PYTHON_PACKAGE_PREFIX=aie python3 -m pip install -r utils/requirements_extras.txt

@@ -30,11 +30,14 @@ jobs:
           fetch-depth: 2
           submodules: "true"
 
-      - name: Install pip packages
-        run: sudo pip install psutil pybind11 numpy
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
 
       - name: Install packages
-        run: sudo apt-get install -y ninja-build clang lld
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build clang lld
       
       - name: Install Ninja
         uses: llvm/actions/install-ninja@55d844821959226fab4911f96f37071c1d4c3268
@@ -63,7 +66,6 @@ jobs:
           pip install -r python/requirements.txt
           pip install -r python/requirements_ml.txt
           pip install -r python/requirements_dev.txt
-          HOST_MLIR_PYTHON_PACKAGE_PREFIX=aie pip install -r python/requirements_extras.txt
 
           LLVM_VERSION=$(utils/clone-llvm.sh --get-wheel-version)
           echo "LLVM_PROJECT_VERSION=${LLVM_VERSION}" | tee -a $GITHUB_OUTPUT
@@ -104,6 +106,10 @@ jobs:
             mkdir -p build_release/docs/platforms/$platform
             cp platforms/$platform/*.md build_release/docs/platforms/$platform
           done
+          mkdir -p build_release/docs/programming_examples
+          python3 programming_examples/generate_readme.py \
+            --output build_release/docs/programming_examples/index.md \
+            --base-url https://github.com/Xilinx/mlir-air/tree/main/programming_examples/
 
       - name: Save LLVM Version
         run: |

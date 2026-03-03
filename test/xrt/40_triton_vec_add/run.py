@@ -69,7 +69,6 @@ with air.ir.Context() as ctx, Location.unknown():
             [
                 "air-resolve-tensor-opoperand-conflicts",
                 "air-override-memref-memory-space{scope=func memory-space=1}",
-                "linalg-fuse-elementwise-ops",
             ]
         )
         + ")"
@@ -97,11 +96,10 @@ with air.ir.Context() as ctx, Location.unknown():
             [
                 f"func.func(air-wrap-func-with-parallel{{loop-bounds={launch_size[0]},{launch_size[1]},{launch_size[2]}}})",
                 "air-par-to-launch{depth=0 has-air-segment=true}",
+                "func.func(air-fuse-alloc-dealloc)",
                 "canonicalize",
                 "cse",
-                "air-par-to-herd{depth=-1}",
                 "air-copy-to-dma",
-                "func.func(air-herd-vectorize)",
                 "canonicalize",
                 "cse",
             ]
@@ -121,19 +119,18 @@ with air.ir.Context() as ctx, Location.unknown():
         M,
     ).astype(
         input_type
-    )  # Shape [M, K]
+    )  # Shape [M]
     B = np.random.rand(
         M,
     ).astype(
         input_type
-    )  # Shape [K, N]
-    C = np.add(A, B).astype(output_type)  # Shape [M, N]
+    )  # Shape [M]
+    C = np.add(A, B).astype(output_type)  # Shape [M]
 
     ###### Compile and test
     runner = XRTRunner(
         omit_while_true_loop=False,
-        air_loop_fusion=True,
-        verbose=True,
+        use_lock_race_condition_fix=True,
     )
     exit(
         runner.run_test(

@@ -1,6 +1,8 @@
 # Copyright (C) 2025, Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 import argparse
+import os
+import sys
 
 from air.ir import *
 from air.dialects.affine import apply as affine_apply
@@ -14,20 +16,21 @@ from air.backend.xrt_runner import XRTRunner, type_mapper
 from air.backend.xrt import XRTBackend
 from air.extras import types as extrasT
 from air.dialects.linalg.opdsl.lang import *
+import air.dialects.linalg.opdsl.lang as linalg_lang
 
 range_ = for_
 
 
 @linalg_structured_op()
 def block_matmul(
-    A=TensorDef(T, S.a, S.c, S.f, S.d, S.g, S.i),
-    B=TensorDef(T, S.b, S.c, S.e, S.f, S.i, S.h),
-    C=TensorDef(U, S.b, S.a, S.e, S.d, S.g, S.h, output=True),
+    A=TensorDef(linalg_lang.TV.T1, S.a, S.c, S.f, S.d, S.g, S.i),
+    B=TensorDef(linalg_lang.TV.T2, S.b, S.c, S.e, S.f, S.i, S.h),
+    C=TensorDef(linalg_lang.TV.U, S.b, S.a, S.e, S.d, S.g, S.h, output=True),
 ):
     domain(D.a, D.b, D.c, D.d, D.e, D.f, D.g, D.h, D.i)
     C[D.b, D.a, D.e, D.d, D.g, D.h] += (
-        TypeFn.cast_signed(U, A[D.a, D.c, D.f, D.d, D.g, D.i])
-    ) * (TypeFn.cast_signed(U, B[D.b, D.c, D.e, D.f, D.i, D.h]))
+        TypeFn.cast_signed(linalg_lang.TV.U, A[D.a, D.c, D.f, D.d, D.g, D.i])
+    ) * (TypeFn.cast_signed(linalg_lang.TV.U, B[D.b, D.c, D.e, D.f, D.i, D.h]))
 
 
 @module_builder
@@ -43,6 +46,7 @@ def build_module(
     herd_n,
     np_dtype_in,
     np_dtype_out,
+    arch="aie2",
 ):
     assert m % tile_m == 0
     assert k % tile_k_l2 == 0
@@ -54,7 +58,11 @@ def build_module(
     xrt_dtype_in = type_mapper(np_dtype_in)
     xrt_dtype_out = type_mapper(np_dtype_out)
 
-    mmul_mkn = [4, 4, 4]
+    # Architecture-specific matrix multiplication dimensions
+    if arch == "aie2p":
+        mmul_mkn = [8, 2, 8]
+    else:  # aie2
+        mmul_mkn = [4, 4, 4]
 
     # L3 MemRefTypes
     memrefTyA = MemRefType.get(a_size, xrt_dtype_in)
@@ -457,7 +465,7 @@ if __name__ == "__main__":
     K = 512
     N = 512
     TILE_M = 64
-    TILE_K_L2 = 64
+    TILE_K_L2 = 128
     TILE_K_L1 = 64
     TILE_N = 64
     HERD_M = 4
@@ -524,12 +532,34 @@ if __name__ == "__main__":
     parser.add_argument(
         "--compile-mode",
         type=str,
-        choices=["compile-only", "compile-and-run"],
+        choices=["compile-only", "compile-and-xclbin", "compile-and-run"],
         dest="compile_mode",
         default="compile-and-run",
-        help="Configure to whether to run after compile",
+        help="Configure compilation mode: compile-only (no XRT, no xclbin), compile-and-xclbin (requires XRT, generates xclbin), or compile-and-run (requires XRT, generates xclbin and runs)",
+    )
+    parser.add_argument(
+        "--direct-codegen",
+        action="store_true",
+        help="Enable direct code generation mode (compiles directly without extra kernel library)",
+    )
+    parser.add_argument(
+        "--arch",
+        type=str,
+        choices=["aie2", "aie2p"],
+        default="aie2",
+        help="Target AIE architecture (aie2 or aie2p)",
     )
     args = parser.parse_args()
+
+    # Check for PEANO_INSTALL_DIR if direct codegen is enabled
+    if args.direct_codegen:
+        if not os.environ.get("PEANO_INSTALL_DIR"):
+            print(
+                "Error: PEANO_INSTALL_DIR environment variable is not set.",
+                file=sys.stderr,
+            )
+            print("Peano is needed for direct code generation mode.", file=sys.stderr)
+            sys.exit(1)
 
     mlir_module = build_module(
         args.m,
@@ -543,7 +573,137 @@ if __name__ == "__main__":
         args.herd_n,
         INPUT_DATATYPE,
         OUTPUT_DATATYPE,
+        args.arch,
     )
+
+    # Vectorization - only run if direct codegen mode is enabled
+    if args.direct_codegen:
+        # Architecture-specific accumulator type for vector intrinsics
+        # aie2: 4x4x4 matrix multiply produces i64 accumulator
+        # aie2p: 8x2x8 matrix multiply produces i32 accumulator
+        # This is due to different vector intrinsic shapes between architectures
+        vector_acc_type = "i64" if args.arch == "aie2" else "i32"
+
+        transform_ir_string = f"""
+        transform.with_pdl_patterns {{
+        ^bb0(%arg0: !pdl.operation):
+            transform.sequence %arg0 : !pdl.operation failures(propagate) {{
+            ^bb1(%arg1: !pdl.operation):
+
+                %func0 = transform.structured.match ops{{["func.func"]}} in %arg1 : (!pdl.operation) -> !pdl.operation
+                transform.apply_patterns to %func0 {{
+                    transform.apply_patterns.linalg.tiling_canonicalization
+                    transform.apply_patterns.scf.for_loop_canonicalization
+                    transform.apply_patterns.canonicalization
+                    transform.apply_patterns.linalg.fold_unit_extent_dims_via_reshapes
+                }} : !pdl.operation
+
+
+                %matmul = transform.structured.match ops{{["linalg.generic"]}} in %arg1  : (!pdl.operation) -> !pdl.operation
+                %inner_most_matmul, %vec_loops:3 =
+                  transform.structured.tile_using_for %matmul tile_sizes [2, 2, 1, 0, 0, 0]
+                  : (!pdl.operation) -> (!pdl.operation, !pdl.operation, !pdl.operation, !pdl.operation)  
+                %inner_most_matmul_to_unroll, %vec_loops_to_unroll:2 =
+                  transform.structured.tile_using_for %inner_most_matmul tile_sizes [1, 1, 0, 0, 0, 0]
+                  : (!pdl.operation) -> (!pdl.operation, !pdl.operation, !pdl.operation)  
+                transform.loop.unroll %vec_loops_to_unroll#1 {{factor = 2}} : !pdl.operation
+                transform.loop.unroll %vec_loops_to_unroll#0 {{factor = 2}} : !pdl.operation
+
+                %linalg_fills = transform.structured.match ops{{["linalg.fill"]}} in %arg1 : (!pdl.operation) -> !pdl.operation
+                %inner_most_fills, %vec_fill_loops:2 =
+                  transform.structured.tile_using_for %linalg_fills tile_sizes [0, 0, 1, 1]
+                  : (!pdl.operation) -> (!pdl.operation, !pdl.operation, !pdl.operation)  
+
+
+                %herds = transform.structured.match ops{{["air.herd"]}} in %arg1 : (!pdl.operation) -> !pdl.operation
+                %vectorized_herds = transform.air.herd_vectorize %herds
+                
+                %herd1, %herd2, %herd3 = transform.split_handle %vectorized_herds : (!pdl.operation) -> (!pdl.operation, !pdl.operation, !pdl.operation)
+                %scf_fors = transform.structured.match ops{{["scf.for"]}} in %herd2 : (!pdl.operation) -> !pdl.operation
+
+                %func1 = transform.structured.match ops{{["func.func"]}} in %arg1 : (!pdl.operation) -> !pdl.operation
+                transform.apply_patterns to %func1 {{
+                    transform.apply_patterns.linalg.tiling_canonicalization
+                    transform.apply_patterns.scf.for_loop_canonicalization
+                    transform.apply_patterns.canonicalization
+                    transform.apply_patterns.linalg.fold_unit_extent_dims_via_reshapes
+                    transform.apply_patterns.memref.fold_memref_alias_ops
+                }} : !pdl.operation
+                
+                // Eliminate redundant vector.transfer_read operations
+                %func1_optimized = transform.air.eliminate_redundant_vector_transfers %func1
+                
+                // Hoist loop-invariant vector transfers out of innermost loop
+                %herds_1 = transform.structured.match ops{{["air.herd"]}} in %arg1 : (!pdl.operation) -> !pdl.operation
+                %herd1_1, %herd2_1, %herd3_1 = transform.split_handle %herds_1 : (!pdl.operation) -> (!pdl.operation, !pdl.operation, !pdl.operation)
+                %all_reads_in_herd2 = transform.structured.match ops{{["vector.transfer_read"]}} in %herd2_1 : (!pdl.operation) -> !pdl.operation
+                %all_writes_in_herd2 = transform.structured.match ops{{["vector.transfer_write"]}} in %herd2_1 : (!pdl.operation) -> !pdl.operation
+                
+                // Split handles to get individual read/write operations
+                %scf_fors_1 = transform.structured.match ops{{["scf.for"]}} in %herd2_1 : (!pdl.operation) -> !pdl.operation
+                %innermost_for, %outer_fors = transform.split_handle %scf_fors_1 {{overflow_result = 1}} : (!pdl.operation) -> (!pdl.operation, !pdl.operation)
+                // The innermost loop has read-write pairs accessing the result buffer
+                %read0, %read1, %read2, %read3, %read4, %read5, %read6, %read7 = transform.split_handle %all_reads_in_herd2 : (!pdl.operation) -> (!pdl.operation, !pdl.operation, !pdl.operation, !pdl.operation, !pdl.operation, !pdl.operation, !pdl.operation, !pdl.operation)
+                %write0, %write1, %write2, %write3 = transform.split_handle %all_writes_in_herd2 : (!pdl.operation) -> (!pdl.operation, !pdl.operation, !pdl.operation, !pdl.operation)
+                
+                %vector_contracts = transform.structured.match ops{{["vector.contract"]}} in %arg1 : (!pdl.operation) -> !pdl.operation
+                %result11 = transform.air.vector_type_cast %vector_contracts {{target_element_type = {vector_acc_type}, input_indices = [2], output_indices = [0]}}
+                
+                // Hoist read/write pair from the innermost loop (%innermost_for)
+                %innermost_for_updated = transform.air.hoist_loop_invariant_transfers %read2, %write0, %innermost_for
+                %innermost_for_updated_1 = transform.air.hoist_loop_invariant_transfers %read4, %write1, %innermost_for_updated
+                %innermost_for_updated_2 = transform.air.hoist_loop_invariant_transfers %read6, %write2, %innermost_for_updated_1
+                %innermost_for_updated_3 = transform.air.hoist_loop_invariant_transfers %read7, %write3, %innermost_for_updated_2
+                %innermost_for_updated_4 = transform.air.flatten_for_iter_args %innermost_for_updated_3
+                %innermost_for_updated_5 = transform.air.hoist_vector_transfer_pointers %innermost_for_updated_4
+
+                %fors_to_hoist_ptrs = transform.structured.match ops{{["scf.for"]}} in %herd2_1 : (!pdl.operation) -> !pdl.operation
+                %innermost_for1, %outer_fors1 = transform.split_handle %fors_to_hoist_ptrs {{overflow_result = 1}}: (!pdl.operation) -> (!pdl.operation, !pdl.operation)
+
+                // Hoist the 4 extsi/trunci pairs from the innermost loop
+                %all_extsi_loop = transform.structured.match ops{{["arith.extsi"]}} in %innermost_for1 : (!pdl.operation) -> !pdl.operation
+                %all_trunci_loop = transform.structured.match ops{{["arith.trunci"]}} in %innermost_for1 : (!pdl.operation) -> !pdl.operation
+                
+                // Split to get individual operations
+                %extsi_i16_1, %extsi_i16_2, %extsi_i16_3, %extsi_i16_4 = transform.split_handle %all_extsi_loop : (!pdl.operation) -> (!pdl.operation, !pdl.operation, !pdl.operation, !pdl.operation)
+                
+                // The 4 trunci ops correspond to the 4 vector.contract results
+                %trunci_1, %trunci_2, %trunci_3, %trunci_4 = transform.split_handle %all_trunci_loop : (!pdl.operation) -> (!pdl.operation, !pdl.operation, !pdl.operation, !pdl.operation)
+                
+                // Hoist first pair (arg29 - index 2)
+                %for1_1_hoisted_1 = transform.air.hoist_cast_pair %extsi_i16_1, %trunci_1, %innermost_for1
+                %all_extsi_loop_2 = transform.structured.match ops{{["arith.extsi"]}} in %for1_1_hoisted_1 : (!pdl.operation) -> !pdl.operation
+                %all_trunci_loop_2 = transform.structured.match ops{{["arith.trunci"]}} in %for1_1_hoisted_1 : (!pdl.operation) -> !pdl.operation
+                %extsi_i16_2_new, %e2_5, %e2_6 = transform.split_handle %all_extsi_loop_2 : (!pdl.operation) -> (!pdl.operation, !pdl.operation, !pdl.operation)
+                %trunci_2_1, %trunci_2_2, %trunci_2_3 = transform.split_handle %all_trunci_loop_2 {{num_result_handles = 3}} : (!pdl.operation) -> (!pdl.operation, !pdl.operation, !pdl.operation)
+                %for1_1_hoisted_2 = transform.air.hoist_cast_pair %extsi_i16_2_new, %trunci_2_1, %for1_1_hoisted_1
+                
+                // Re-match and hoist third pair
+                %all_extsi_loop_3 = transform.structured.match ops{{["arith.extsi"]}} in %for1_1_hoisted_2 : (!pdl.operation) -> !pdl.operation
+                %all_trunci_loop_3 = transform.structured.match ops{{["arith.trunci"]}} in %for1_1_hoisted_2 : (!pdl.operation) -> !pdl.operation
+                %extsi_i16_3_new, %e3_7 = transform.split_handle %all_extsi_loop_3 : (!pdl.operation) -> (!pdl.operation, !pdl.operation)
+                %trunci_3_1, %trunci_3_2 = transform.split_handle %all_trunci_loop_3 : (!pdl.operation) -> (!pdl.operation, !pdl.operation)
+                %for1_1_hoisted_3 = transform.air.hoist_cast_pair %extsi_i16_3_new, %trunci_3_1, %for1_1_hoisted_2
+                
+                // Re-match and hoist fourth pair
+                %all_extsi_loop_4 = transform.structured.match ops{{["arith.extsi"]}} in %for1_1_hoisted_3 : (!pdl.operation) -> !pdl.operation
+                %all_trunci_loop_4 = transform.structured.match ops{{["arith.trunci"]}} in %for1_1_hoisted_3 : (!pdl.operation) -> !pdl.operation
+                %for1_1_hoisted_final = transform.air.hoist_cast_pair %all_extsi_loop_4, %all_trunci_loop_4, %for1_1_hoisted_3
+
+                %func2 = transform.structured.match ops{{["func.func"]}} in %arg1 : (!pdl.operation) -> !pdl.operation
+                transform.apply_patterns to %func2 {{
+                    transform.apply_patterns.linalg.tiling_canonicalization
+                    transform.apply_patterns.scf.for_loop_canonicalization
+                    transform.apply_patterns.canonicalization
+                    transform.apply_patterns.linalg.fold_unit_extent_dims_via_reshapes
+                    transform.apply_patterns.memref.fold_memref_alias_ops
+                }} : !pdl.operation
+
+            }}
+        }}
+        """
+        transform_ir = Module.parse(transform_ir_string, context=mlir_module.context)
+        run_transform(transform_ir, mlir_module)
     if args.print_module_only:
         print(mlir_module)
         exit(0)
@@ -587,12 +747,16 @@ if __name__ == "__main__":
         }
 
         ###### Compile and test
-        runner = XRTRunner(
-            verbose=args.verbose,
-            omit_while_true_loop=False,
-            runtime_loop_tiling_sizes=[2, 2],
-            lower_linalg_to_func="mm.o",
-        )
+        runner_kwargs = {
+            "verbose": args.verbose,
+            "omit_while_true_loop": False,
+            "runtime_loop_tiling_sizes": [2, 2],
+        }
+        # Only use external kernel library if NOT in direct codegen mode
+        if not args.direct_codegen:
+            runner_kwargs["lower_linalg_to_func"] = "mm.o"
+
+        runner = XRTRunner(**runner_kwargs, instance_name="matmul_bf16")
         exit(
             runner.run_test(
                 mlir_module,
@@ -602,14 +766,42 @@ if __name__ == "__main__":
             )
         )
 
-    elif args.compile_mode == "compile-only":
-        ###### Compile only
-        backend = XRTBackend(
-            verbose=args.verbose,
-            omit_while_true_loop=False,
-            runtime_loop_tiling_sizes=[2, 2],
-            lower_linalg_to_func="mm.o",
-        )
+    elif args.compile_mode == "compile-and-xclbin":
+        ###### Compile and generate xclbin (requires XRT, no execution)
+        backend_kwargs = {
+            "verbose": args.verbose,
+            "omit_while_true_loop": False,
+            "runtime_loop_tiling_sizes": [2, 2],
+        }
+        # Only use external kernel library if NOT in direct codegen mode
+        if not args.direct_codegen:
+            backend_kwargs["lower_linalg_to_func"] = "mm.o"
+
+        backend = XRTBackend(**backend_kwargs)
         module_function = backend.compile(mlir_module)
 
         backend.unload()
+
+    elif args.compile_mode == "compile-only":
+        ###### Compile only (without XRT dependencies)
+        # Map architecture to target device
+        target_device = "npu2" if args.arch == "aie2p" else "npu1"
+
+        backend_kwargs = {
+            "verbose": args.verbose,
+            "target_device": target_device,  # Explicit target based on arch (no xrt dependencies)
+            "output_format": "none",  # Skip xclbin generation (no xrt dependencies)
+            "omit_while_true_loop": False,
+            "runtime_loop_tiling_sizes": [2, 2],
+        }
+        # Only use external kernel library if NOT in direct codegen mode
+        if not args.direct_codegen:
+            backend_kwargs["lower_linalg_to_func"] = "mm.o"
+
+        backend = XRTBackend(**backend_kwargs)
+        module_function = backend.compile(mlir_module)
+
+        backend.unload()
+
+        print("Compilation completed successfully!")
+        sys.exit(0)

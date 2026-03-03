@@ -1,33 +1,39 @@
 # MLIR-AIR Programming Examples
 
-These programming examples are provided so that application programmers can learn how to leverage the AIR design flow with mlir-air python bindings, as well as the mlir-air intermediate representation (IR) directly, to build applications targeting AI Engines.
+These programming examples demonstrate how to leverage the AIR design flow with mlir-air Python bindings and the mlir-air intermediate representation (IR) to build applications targeting AI Engines on AMD NPUs.
 
-## [2-Dimensional Shim DMA Passthrough](shim_dma_2d)
+## Operator Dashboard
 
-This example demonstrates how data may be moved using shim DMA operations. It also includes extra infrastructure that illustrates different ways to compile, build, run, and test programs written using the mlir-air python bindings on an NPU.
+See the **[Operator Dashboard](https://xilinx.github.io/mlir-air/programming_examples/)** for the full table of supported operators with NPU1/NPU2 status indicators. The dashboard is auto-generated from LIT test files and published to GitHub Pages on every push to `main`.
 
-## [Passthrough Examples](passthrough)
+## Getting Started
 
-This directory contains three examples that each copy data from the input to the output (a data passthrough). The data movement is done through either DMA or Channels, and there is a simple example of calling a an external function which performs a vectorized memcopy.
+See the top-level [README](../README.md) for environment setup and build instructions. Once your environment is configured:
 
-## [Channel Examples](channel_examples)
+```bash
+# Example: run matrix multiplication (bf16, 4x4 herd, 512x512x512)
+cd matrix_multiplication/bf16
+make run4x4
 
-This is a collection of simple examples that illustrate how to use *channels*. At a high level, channels are the abstraction for data movement in mlir-air. Some of the examples are experimental works-in-progress.
+# Print generated MLIR without running
+make print
+```
 
-## [Matrix Scalar Addition](matrix_scalar_add)
+Most examples with a `Makefile` support `make run` (compile and execute on hardware) and `make print` (generate MLIR only). Examples without a Makefile can be run directly with Python:
 
-This example provides logic to divide an input 2D matrix into *tiles* of data, and add a value to every element in every tile. It includes some description of the fundamental concepts of mlir-air, including *launches*, *herds*, and *channels*. There are five different implementations of this example, some of which are experimental (and are currently works-in-progress).
+```bash
+python3 run.py                    # compile and run (XRTRunner)
+python3 run.py --print-module-only  # print IR only
+```
 
-## [Data Transfer Transpose](data_transfer_transpose)
+## Benchmarking
 
-Transposes a matrix with using either air channels or `dma_memcpy_nd`.
+The [matrix multiplication](matrix_multiplication/) examples include sweep infrastructure for measuring end-to-end latency across problem sizes:
 
-## [Segment Alloc](segment_alloc)
+```bash
+cd matrix_multiplication/bf16
+make sweep4x4    # sweep problem sizes 256-2048 with a 4x4 herd
+make profile     # profile a single 1024^3 problem on hardware
+```
 
-While a *worker* (a compute unit managed as part of a *herd*) are able to allocate L1 memory, they are not able to allocate L2 memory. This must be done in the *segment*. This example shows how a segment can allocate L2 memory which is then accessed within the herd.
-
-## [WIP: Multi-Segment Examples](multi_segment)
-
-This is a collection of simple examples that illustrate how to use multiple segments.
-
-Warning: This example is a work-in-progress.
+Sweep results are saved as CSV files for analysis. See the [bf16 README](matrix_multiplication/bf16/README.md) for details on tile size configuration and architecture selection.

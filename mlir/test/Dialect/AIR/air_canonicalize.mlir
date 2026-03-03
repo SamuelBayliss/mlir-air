@@ -352,6 +352,24 @@ func.func @execute_5(%alloc : memref<4xi32>) -> (!air.async.token) {
   return %0 :!air.async.token
 }
 
+// Test that air.execute containing memref.store is NOT folded away even when
+// its async token is unused (consumed by wait_all that gets folded).
+// This prevents the FoldExecute canonicalization from eliminating side effects.
+// CHECK-LABEL: execute_store_preserved
+// CHECK: air.execute {
+// CHECK-NEXT: memref.store
+// CHECK-NEXT: }
+func.func @execute_store_preserved(%alloc : memref<4xi32>) {
+  %c0 = arith.constant 0 : index
+  %cst = arith.constant 42 : i32
+  %t = air.execute {
+    memref.store %cst, %alloc[%c0] : memref<4xi32>
+  }
+  // wait_all with single dep gets folded, making %t unused
+  %w = air.wait_all async [%t]
+  return
+}
+
 // CHECK: func.func @chan_0
 // CHECK: %[[TOKEN0:.*]] = air.channel.get async  @channel_0
 // CHECK: %[[TOKEN1:.*]] = air.channel.get async  @channel_1
@@ -1075,8 +1093,8 @@ air.channel @channel_cascade [3] {channel_type = "cascade"}
 
 // CHECK-LABEL: func.func @channel_cascade_fold_cast_only
 // CHECK-NOT: %[[CAST:.*]] = memref.cast %{{.*}} : memref<256x256xbf16> to memref<256x256xbf16, strided<[256, 1], offset: ?>>
-// CHECK: %[[REINTERPRET:.*]] = memref.reinterpret_cast %{{.*}} to offset: [%c0{{.*}}], sizes: [256, 256], strides: [256, 1] : memref<256x256xbf16> to memref<256x256xbf16, strided<[256, 1], offset: ?>>
-// CHECK: air.channel.put @channel_cascade[%c0{{.*}}] (%[[REINTERPRET]][] [] []) : (memref<256x256xbf16, strided<[256, 1], offset: ?>>)
+// CHECK: %[[REINTERPRET:.*]] = memref.reinterpret_cast %{{.*}} to offset: [0], sizes: [256, 256], strides: [256, 1] : memref<256x256xbf16> to memref<256x256xbf16, strided<[256, 1]>>
+// CHECK: air.channel.put @channel_cascade[%c0{{.*}}] (%[[REINTERPRET]][] [] []) : (memref<256x256xbf16, strided<[256, 1]>>)
 func.func @channel_cascade_fold_cast_only(%arg0: memref<256x256xbf16>) {
   %c0 = arith.constant 0 : index
   %offset = arith.constant 0 : index
@@ -1085,5 +1103,53 @@ func.func @channel_cascade_fold_cast_only(%arg0: memref<256x256xbf16>) {
   %cast = memref.cast %arg0 : memref<256x256xbf16> to memref<256x256xbf16, strided<[256, 1], offset: ?>>
   %reinterpret_cast = memref.reinterpret_cast %cast to offset: [%offset], sizes: [256, 256], strides: [256, 1] : memref<256x256xbf16, strided<[256, 1], offset: ?>> to memref<256x256xbf16, strided<[256, 1], offset: ?>>
   air.channel.put @channel_cascade[%c0] (%reinterpret_cast[] [] []) : (memref<256x256xbf16, strided<[256, 1], offset: ?>>)
+  return
+}
+
+// Test for scf.for loop with mixed iter_args (index + async token).
+// This is a regression test for a bug where CanonicalizeAsyncLoopCarriedDepsInRegion
+// was incorrectly inserting all init args (including index types) into the
+// regionTokens set when creating an air.wait_all operation, causing a verification
+// failure since air.wait_all only accepts !air.async.token operands.
+// The test verifies that canonicalization runs without errors on such loops.
+
+// CHECK-LABEL: func.func @scf_for_mixed_iter_args
+// CHECK: air.herd
+func.func @scf_for_mixed_iter_args() {
+  %c4 = arith.constant 4 : index
+  %0 = air.herd @herd_0 async tile (%arg0, %arg1) in (%arg2=%c4, %arg3=%c4) attributes {id = 1 : i32} {
+    %c0 = arith.constant 0 : index
+    %c1 = arith.constant 1 : index
+    %c8 = arith.constant 8 : index
+    %c64 = arith.constant 64 : index
+    %c512 = arith.constant 512 : index
+
+    %async_token, %results = air.execute -> (memref<8x8x8x8xbf16, 2>) {
+      %alloc = memref.alloc() : memref<8x8x8x8xbf16, 2>
+      air.execute_terminator %alloc : memref<8x8x8x8xbf16, 2>
+    }
+
+    %init_token = air.wait_all async [%async_token]
+    %init_idx1 = arith.muli %c0, %c64 : index
+    %init_idx2 = arith.muli %c0, %c512 : index
+    // This scf.for loop has mixed iter_args: 2 index values and 1 async token.
+    // The canonicalization should only include the async token in any
+    // air.wait_all operations, not the index values.
+    %final:3 = scf.for %arg4 = %c0 to %c8 step %c1 iter_args(%arg5 = %init_idx1, %arg6 = %init_idx2, %arg7 = %init_token) -> (index, index, !air.async.token) {
+      %async_token_1, %results_1 = air.execute [%arg7] -> (vector<64xbf16>) {
+        %ub = ub.poison : bf16
+        %collapse_shape = memref.collapse_shape %results [[0, 1, 2, 3]] : memref<8x8x8x8xbf16, 2> into memref<4096xbf16, 2>
+        %read = vector.transfer_read %collapse_shape[%arg5], %ub {in_bounds = [true]} : memref<4096xbf16, 2>, vector<64xbf16>
+        air.execute_terminator %read : vector<64xbf16>
+      }
+      %next_idx1 = arith.addi %arg5, %c512 : index
+      %next_idx2 = arith.addi %arg6, %c64 : index
+      %wait = air.wait_all async [%async_token_1]
+      scf.yield %next_idx1, %next_idx2, %wait : index, index, !air.async.token
+    }
+    %async_token_2 = air.execute [%final#2] {
+      memref.dealloc %results : memref<8x8x8x8xbf16, 2>
+    }
+  }
   return
 }

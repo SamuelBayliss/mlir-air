@@ -307,10 +307,9 @@ void clearAsyncDependenciesOfAsyncOpImpl(scf::ForOp op) {
   for (auto v : operands_without_wait_all) {
     OpBuilder builder(op);
     SmallVector<Value> dep_list = {};
-    air::WaitAllOp wait_all_op_before_loop =
-        builder.create<xilinx::air::WaitAllOp>(
-            builder.getUnknownLoc(), air::AsyncTokenType::get(op->getContext()),
-            dep_list);
+    air::WaitAllOp wait_all_op_before_loop = xilinx::air::WaitAllOp::create(
+        builder, builder.getUnknownLoc(),
+        air::AsyncTokenType::get(op->getContext()), dep_list);
     op->replaceUsesOfWith(v, wait_all_op_before_loop.getAsyncToken());
   }
 }
@@ -331,10 +330,9 @@ void clearAsyncDependenciesOfAsyncOpImpl(scf::ParallelOp op) {
   for (auto v : operands_without_wait_all) {
     OpBuilder builder(op);
     SmallVector<Value> dep_list = {};
-    air::WaitAllOp wait_all_op_before_loop =
-        builder.create<xilinx::air::WaitAllOp>(
-            builder.getUnknownLoc(), air::AsyncTokenType::get(op->getContext()),
-            dep_list);
+    air::WaitAllOp wait_all_op_before_loop = xilinx::air::WaitAllOp::create(
+        builder, builder.getUnknownLoc(),
+        air::AsyncTokenType::get(op->getContext()), dep_list);
     op->replaceUsesOfWith(v, wait_all_op_before_loop.getAsyncToken());
   }
 }
@@ -369,26 +367,25 @@ Value getLoopCarriedTokenFromScfOp(scf::ForOp op,
                                    std::string operand_or_argument) {
   if (operand_or_argument == "operand") {
     if (!op.getInitArgs().size()) {
-      op->emitOpError("has no iter_arg");
       return nullptr;
     }
-    auto token = op.getInitArgs()[0];
-    if (!llvm::isa<air::AsyncTokenType>(token.getType())) {
-      op->emitOpError("iter operand is not an async token");
-      return nullptr;
+    for (auto initArg : op.getInitArgs()) {
+      if (isa<air::AsyncTokenType>(initArg.getType()))
+        return initArg;
     }
-    return token;
+    // No async token found - return nullptr without error
+    return nullptr;
   } else if (operand_or_argument == "argument") {
     if (!op.getRegionIterArgs().size()) {
-      op->emitOpError("has no iter_arg");
       return nullptr;
     }
-    auto token = op.getRegionIterArgs()[0];
-    if (!llvm::isa<air::AsyncTokenType>(token.getType())) {
-      op->emitOpError("iter operand is not an async token");
-      return nullptr;
+    for (auto iterArg : op.getRegionIterArgs()) {
+      if (isa<air::AsyncTokenType>(iterArg.getType())) {
+        return iterArg;
+      }
     }
-    return token;
+    // No async token found - return nullptr without error
+    return nullptr;
   } else {
     op->emitOpError("unknown string in operand_or_argument");
     return nullptr;
@@ -398,8 +395,8 @@ air::WaitAllOp assignEmptyWaitAllAtScfForIterArg(OpBuilder builder,
                                                  scf::ForOp &op) {
   auto checkpoint = builder.saveInsertionPoint();
   builder.setInsertionPoint(op);
-  air::WaitAllOp sink_wait_all_op = builder.create<air::WaitAllOp>(
-      op->getLoc(), air::AsyncTokenType::get(builder.getContext()),
+  air::WaitAllOp sink_wait_all_op = air::WaitAllOp::create(
+      builder, op->getLoc(), air::AsyncTokenType::get(builder.getContext()),
       SmallVector<Value>{});
   op->getOpOperand(op.getNumControlOperands())
       .assign(sink_wait_all_op.getAsyncToken());
@@ -411,15 +408,16 @@ air::WaitAllOp assignEmptyWaitAllAtScfForIterArg(OpBuilder builder,
 scf::ReduceOp createSCFReduceForAsyncSCFParallel(OpBuilder builder,
                                                  Location loc, Value token,
                                                  MLIRContext *ctx) {
-  auto reduce_op = builder.create<scf::ReduceOp>(loc, token);
+  auto reduce_op = scf::ReduceOp::create(builder, loc, token);
   builder.setInsertionPointToStart(&reduce_op.getRegion(0).front());
   SmallVector<Value, 4> reduce_tokens;
   reduce_tokens.push_back(reduce_op.getRegion(0).front().getArgument(0));
   reduce_tokens.push_back(reduce_op.getRegion(0).front().getArgument(1));
-  auto reduce_res = builder.create<xilinx::air::WaitAllOp>(
-      builder.getUnknownLoc(), air::AsyncTokenType::get(ctx), reduce_tokens);
-  builder.create<scf::ReduceReturnOp>(builder.getUnknownLoc(),
-                                      reduce_res.getResult(0));
+  auto reduce_res = xilinx::air::WaitAllOp::create(
+      builder, builder.getUnknownLoc(), air::AsyncTokenType::get(ctx),
+      reduce_tokens);
+  scf::ReduceReturnOp::create(builder, builder.getUnknownLoc(),
+                              reduce_res.getResult(0));
   return reduce_op;
 }
 
@@ -530,8 +528,8 @@ void addAsyncDependencyIfNewImpl(scf::ForOp op, Value token) {
     OpBuilder builder(op);
     SmallVector<Value> dep_list = {token, v};
     air::WaitAllOp wait_all_op_before_loop =
-        builder.create<xilinx::air::WaitAllOp>(
-            builder.getUnknownLoc(), air::AsyncTokenType::get(ctx), dep_list);
+        xilinx::air::WaitAllOp::create(builder, builder.getUnknownLoc(),
+                                       air::AsyncTokenType::get(ctx), dep_list);
     op->replaceUsesOfWith(v, wait_all_op_before_loop.getAsyncToken());
   }
   // If scf.for loop isn't async, then make it async.
@@ -561,15 +559,47 @@ void addAsyncDependencyIfNewImpl(scf::ParallelOp op, Value token) {
   for (auto v : operands_without_wait_all) {
     OpBuilder builder(op);
     SmallVector<Value> dep_list = {};
-    air::WaitAllOp wait_all_op_before_loop =
-        builder.create<xilinx::air::WaitAllOp>(
-            builder.getUnknownLoc(), air::AsyncTokenType::get(op->getContext()),
-            dep_list);
+    air::WaitAllOp wait_all_op_before_loop = xilinx::air::WaitAllOp::create(
+        builder, builder.getUnknownLoc(),
+        air::AsyncTokenType::get(op->getContext()), dep_list);
     op->replaceUsesOfWith(v, wait_all_op_before_loop.getAsyncToken());
     replaceAllUsesInRegionWith(v, wait_all_op_before_loop.getAsyncToken(),
                                op.getRegion());
     addAsyncDependencyIfNewImpl(wait_all_op_before_loop, v);
     addAsyncDependencyIfNewImpl(wait_all_op_before_loop, token);
+  }
+}
+void addAsyncDependencyIfNewImpl(affine::AffineIfOp op, Value token) {
+  // Process operations in the then block
+  for (auto &nested_op : op.getThenBlock()->getOperations()) {
+    // Skip affine.yield terminators
+    if (isa<affine::AffineYieldOp>(nested_op))
+      continue;
+
+    // Recursively process nested affine.if operations
+    if (auto nested_affine_if = dyn_cast<affine::AffineIfOp>(nested_op)) {
+      addAsyncDependencyIfNewImpl(nested_affine_if, token);
+    } else {
+      // For non-affine.if operations, call addAsyncDependencyIfNew
+      addAsyncDependencyIfNew(&nested_op, token);
+    }
+  }
+
+  // Process operations in the else block if it exists
+  if (op.hasElse()) {
+    for (auto &nested_op : op.getElseBlock()->getOperations()) {
+      // Skip affine.yield terminators
+      if (isa<affine::AffineYieldOp>(nested_op))
+        continue;
+
+      // Recursively process nested affine.if operations
+      if (auto nested_affine_if = dyn_cast<affine::AffineIfOp>(nested_op)) {
+        addAsyncDependencyIfNewImpl(nested_affine_if, token);
+      } else {
+        // For non-affine.if operations, call addAsyncDependencyIfNew
+        addAsyncDependencyIfNew(&nested_op, token);
+      }
+    }
   }
 }
 void addAsyncDependencyIfNew(Operation *op, Value token) {
@@ -587,6 +617,8 @@ void addAsyncDependencyIfNew(Operation *op, Value token) {
     addAsyncDependencyIfNewImpl(for_op, token);
   } else if (auto parallel_op = dyn_cast<scf::ParallelOp>(op)) {
     addAsyncDependencyIfNewImpl(parallel_op, token);
+  } else if (auto affine_if_op = dyn_cast<affine::AffineIfOp>(op)) {
+    addAsyncDependencyIfNewImpl(affine_if_op, token);
   } else
     op->emitOpError("unknown async op");
 }
@@ -630,16 +662,17 @@ bool areAsyncDependent(Operation *a, Operation *b) {
     if (chanA.getChanName() == chanB.getChanName()) {
       if (chanA.getIndices().size() != chanB.getIndices().size())
         return true;
+      // Check all index positions. If ANY position has two different constant
+      // values, we can prove independence regardless of other positions.
       for (unsigned i = 0; i < chanA.getIndices().size(); i++) {
         auto constIdxA = getConstantIntValue(chanA.getIndices()[i]);
         auto constIdxB = getConstantIntValue(chanB.getIndices()[i]);
-        if (!constIdxA)
-          return true;
-        if (!constIdxB)
-          return true;
-        if (*constIdxA != *constIdxB)
+        // If BOTH are constants AND they differ → INDEPENDENT
+        if (constIdxA && constIdxB && (*constIdxA != *constIdxB))
           return false;
       }
+      // After checking all indices, if none were provably different →
+      // DEPENDENT
       return true;
     }
   return false;
@@ -665,6 +698,35 @@ bool isAsyncDependent(Operation *a, Operation *b) {
     }
   }
   return false;
+}
+
+// Generate a wait_all at the end of block, which gathers all dangling async
+// tokens.
+air::WaitAllOp generateWaitAllToTerminateBlock(Block &block, OpBuilder &b,
+                                               bool isBlocking) {
+  llvm::SetVector<Value> blockTokens, danglingTokens;
+  blockTokens.insert(block.getArguments().begin(), block.getArguments().end());
+  for (auto &o : block.getOperations())
+    blockTokens.insert(o.getResults().begin(), o.getResults().end());
+  for (auto t : blockTokens) {
+    if (!t.use_empty())
+      continue;
+    if (!isa<air::AsyncTokenType>(t.getType()))
+      continue;
+    danglingTokens.insert(t);
+  }
+  if (block.mightHaveTerminator())
+    b.setInsertionPoint(block.getTerminator());
+  else
+    b.setInsertionPointToEnd(&block);
+  if (isBlocking)
+    return air::WaitAllOp::create(b, b.getUnknownLoc(),
+                                  /*result_type*/ Type(),
+                                  danglingTokens.takeVector());
+  else
+    return air::WaitAllOp::create(b, b.getUnknownLoc(),
+                                  air::AsyncTokenType::get(b.getContext()),
+                                  danglingTokens.takeVector());
 }
 
 // Splits an SCF for loop into two for loops, by hoisting target operations in
@@ -696,14 +758,13 @@ scf::ForOp hoistTargetOpsToNewSCFFor(PatternRewriter &rewriter,
 
   rewriter.setInsertionPoint(for_op);
   IRMapping remap;
-  auto new_for_op = rewriter.create<scf::ForOp>(
-      loc, for_op.getLowerBound(), for_op.getUpperBound(), for_op.getStep(),
-      for_op.getInitArgs());
+  auto new_for_op = scf::ForOp::create(rewriter, loc, for_op.getLowerBound(),
+                                       for_op.getUpperBound(), for_op.getStep(),
+                                       for_op.getInitArgs());
   remap.map(for_op.getInductionVar(), new_for_op.getInductionVar());
   remap.map(getLoopCarriedTokenFromScfOp(for_op, "argument"),
             getLoopCarriedTokenFromScfOp(new_for_op, "argument"));
   rewriter.setInsertionPointToStart(new_for_op.getBody());
-  SmallVector<Value> yield_operands;
   // Build up a log of ops to be cloned; using SetVector to avoid repetition.
   llvm::SetVector<Operation *> ops_to_be_cloned;
   for (auto op : target_ops) {
@@ -722,18 +783,34 @@ scf::ForOp hoistTargetOpsToNewSCFFor(PatternRewriter &rewriter,
     ops_to_be_cloned.insert(backwardSlices.begin(), backwardSlices.end());
     ops_to_be_cloned.insert(op);
   }
-  Operation *back_of_dep_chain;
-  for (auto o : ops_to_be_cloned)
-    back_of_dep_chain = rewriter.clone(*o, remap);
-  yield_operands.push_back(getAsyncTokenFromOp(back_of_dep_chain));
 
-  rewriter.create<scf::YieldOp>(
-      loc, SmallVector<Value>{
-               rewriter
-                   .create<air::WaitAllOp>(
-                       loc, air::AsyncTokenType::get(rewriter.getContext()),
-                       yield_operands)
-                   ->getResult(0)});
+  // Clone all collected operations into the new for loop body
+  for (auto o : ops_to_be_cloned)
+    rewriter.clone(*o, remap);
+
+  SmallVector<Value> yield_operands;
+  // If the new for loop is async, we need to properly terminate it with async
+  // tokens
+  if (air::isAsyncOp(new_for_op)) {
+    // Generate a wait_all op that collects all dangling async tokens in the
+    // loop body. This ensures all async operations within the loop are properly
+    // synchronized.
+    auto waitAllOp = generateWaitAllToTerminateBlock(
+        *new_for_op.getBody(), rewriter, /*isBlocking*/ false);
+    yield_operands.push_back(getAsyncTokenFromOp(waitAllOp));
+
+    // Create the scf.yield operation for the loop, yielding a wait_all token.
+    // The yielded wait_all synchronizes on all operations collected by
+    // waitAllOp, allowing the for loop to properly propagate async dependencies
+    // to subsequent iterations.
+    scf::YieldOp::create(
+        rewriter, loc,
+        SmallVector<Value>{air::WaitAllOp::create(
+                               rewriter, loc,
+                               air::AsyncTokenType::get(rewriter.getContext()),
+                               yield_operands)
+                               ->getResult(0)});
+  }
 
   return new_for_op;
 }
@@ -815,8 +892,8 @@ void preserveAsyncDependenciesAfterUnroll(Block &parentBlock) {
       Operation *user = use->getOwner();
       if (auto yieldUser = dyn_cast<scf::YieldOp>(user)) {
         OpBuilder builder(yieldUser);
-        user = builder.create<air::WaitAllOp>(
-            yieldUser->getLoc(),
+        user = air::WaitAllOp::create(
+            builder, yieldUser->getLoc(),
             air::AsyncTokenType::get(yieldUser->getContext()),
             SmallVector<Value>{use->get()});
         use->assign(user->getResult(0));
@@ -939,8 +1016,8 @@ LogicalResult unrollScfParallel(
             .end()); // scf.parallel induction vars. have LSD at highest index.
     for (unsigned i = 0; i < position.size(); i++) {
       localRemap.map(par.getInductionVars()[i],
-                     builder.create<arith::ConstantIndexOp>(
-                         builder.getUnknownLoc(),
+                     arith::ConstantIndexOp::create(
+                         builder, builder.getUnknownLoc(),
                          position[i] * *getConstantIntValue(par.getStep()[i]) +
                              *getConstantIntValue(par.getLowerBound()[i])));
     }
@@ -954,8 +1031,8 @@ LogicalResult unrollScfParallel(
     }
     // Unroll air.wait_all token reduction
     if (getAsyncTokenFromOp(par)) {
-      auto yieldedWaitAll = builder.create<air::WaitAllOp>(
-          loc, air::AsyncTokenType::get(builder.getContext()),
+      auto yieldedWaitAll = air::WaitAllOp::create(
+          builder, loc, air::AsyncTokenType::get(builder.getContext()),
           yieldedTokensInIter);
       yieldedTokens.push_back(yieldedWaitAll.getAsyncToken());
     }
@@ -963,9 +1040,8 @@ LogicalResult unrollScfParallel(
 
   if (auto parToken = getAsyncTokenFromOp(par)) {
     parToken.replaceAllUsesWith(
-        builder
-            .create<air::WaitAllOp>(loc, air::AsyncTokenType::get(ctx),
-                                    yieldedTokens)
+        air::WaitAllOp::create(builder, loc, air::AsyncTokenType::get(ctx),
+                               yieldedTokens)
             .getAsyncToken());
   }
   return success();
@@ -999,11 +1075,11 @@ separateScfParallelByDims(RewriterBase &rewriter, scf::ParallelOp par,
     }
   }
 
-  auto outerPar = rewriter.create<scf::ParallelOp>(loc, outerLbs, outerUbs,
-                                                   outerSteps, inits);
+  auto outerPar = scf::ParallelOp::create(rewriter, loc, outerLbs, outerUbs,
+                                          outerSteps, inits);
   rewriter.setInsertionPointToStart(outerPar.getBody());
-  auto innerPar = rewriter.create<scf::ParallelOp>(loc, innerLbs, innerUbs,
-                                                   innerSteps, inits);
+  auto innerPar = scf::ParallelOp::create(rewriter, loc, innerLbs, innerUbs,
+                                          innerSteps, inits);
   int innerIdx = 0;
   int outerIdx = 0;
   for (unsigned i = 0; i < par.getNumLoops(); i++) {
@@ -1169,9 +1245,9 @@ air::WaitAllOp replaceAsyncOpWithWaitAll(OpBuilder builder, IRMapping &remap,
       dep_list_remap.push_back(remap.lookupOrDefault(dep));
     }
   }
-  auto wa_op = builder.create<air::WaitAllOp>(
-      builder.getUnknownLoc(), air::AsyncTokenType::get(op->getContext()),
-      dep_list_remap);
+  auto wa_op = air::WaitAllOp::create(
+      builder, builder.getUnknownLoc(),
+      air::AsyncTokenType::get(op->getContext()), dep_list_remap);
   remap.map(air::getAsyncTokenFromOp(op), wa_op.getAsyncToken());
   return wa_op;
 }
@@ -1225,6 +1301,11 @@ getAllReadAccessedMemrefOperandsFromOp(Operation *op) {
                                   memcpy.getSrcMemref(), memcpy.getSrcOffsets(),
                                   memcpy.getSrcSizes(), memcpy.getSrcStrides()),
                               operands);
+  } else if (auto loadOp = dyn_cast<memref::LoadOp>(op)) {
+    // memref.load reads from the memref
+    pushMemrefEntryToVector(getMemrefEntry(loadOp.getMemRef()), operands);
+  } else if (isa<memref::StoreOp>(op)) {
+    // memref.store writes to the memref -- no read of the memref itself
   } else { // If unknown op, then assume all operands are read.
     for (auto oper : op->getOperands())
       pushMemrefEntryToVector(getMemrefEntry(oper), operands);
@@ -1291,6 +1372,11 @@ getAllWriteAccessedMemrefOperandsFromOp(Operation *op) {
                                   memcpy.getDstMemref(), memcpy.getDstOffsets(),
                                   memcpy.getDstSizes(), memcpy.getDstStrides()),
                               operands);
+  } else if (auto storeOp = dyn_cast<memref::StoreOp>(op)) {
+    // memref.store writes to the memref destination only
+    pushMemrefEntryToVector(getMemrefEntry(storeOp.getMemRef()), operands);
+  } else if (isa<memref::LoadOp>(op)) {
+    // memref.load reads from the memref -- no write access
   } else { // If unknown op, then assume all operands and results are written
            // to.
     for (auto oper : llvm::concat<Value>(op->getOperands(), op->getResults()))
@@ -2240,15 +2326,20 @@ void dependencyCanonicalizer::fillAIRDepListUsingGraphTR(
       if (op == src_op)
         continue; // Avoid dep to itself
       if (graph.g[TRVertex].asyncEventType == "for_loop") {
-        auto value = dyn_cast<scf::ForOp>(src_op).getRegionIterArgs()[0];
-        async_op.addAsyncDependency(value);
+        auto value = getLoopCarriedTokenFromScfOp(dyn_cast<scf::ForOp>(src_op),
+                                                  "argument");
+        if (value)
+          async_op.addAsyncDependency(value);
       } else if (graph.g[TRVertex].asyncEventType == "parallel_loop") {
-        auto value = dyn_cast<scf::ParallelOp>(src_op).getInitVals()[0];
-        async_op.addAsyncDependency(value);
+        auto value =
+            getLoopCarriedTokenFromScfOp(dyn_cast<scf::ParallelOp>(src_op));
+        if (value)
+          async_op.addAsyncDependency(value);
       } else if (graph.g[TRVertex].asyncEventType == "terminator") {
         auto parent_op = src_op->getParentOp();
-        auto value = parent_op->getResult(0);
-        async_op.addAsyncDependency(value);
+        auto value = getAsyncTokenFromOp(parent_op);
+        if (value)
+          async_op.addAsyncDependency(value);
       } else if (auto async_src_op =
                      dyn_cast<xilinx::air::AsyncOpInterface>(src_op)) {
         // Elevate src token if src op is in affine if
@@ -2550,56 +2641,69 @@ void dependencyTracer::addDependencyBetweenOps(Operation *source,
   }
 }
 
-// Check if two partial memref tiles have identical indices
+// Check if two partial memref tiles have overlapping access ranges.
+// Returns true if they overlap or if overlap cannot be determined.
+// Only returns false when provably disjoint.
 bool dependencyTracer::areOverlappingPartialMemrefs(partialMemref *tile_0,
                                                     partialMemref *tile_1) {
-  // Check if all static offsets of each partialMemref lead to equal overall
-  // offset.
-  auto getOffsetFromOffsetsAndStrides = [&](partialMemref *tile) {
-    unsigned offset = 0;
-    for (unsigned i = 0; i < tile->offsets.size(); i++) {
-      auto constOffset = getConstantIntValue(tile->offsets[i]);
-      auto constStride = getConstantIntValue(tile->strides[i]);
-      if (!constOffset || !constStride)
-        continue;
-      offset += (*constOffset) * (*constStride);
-    }
-    return offset;
-  };
-
   // If any of the two partialMemrefs have empty offsets list, then that
   // partialMemref represents the entire memref, and therefore guarantees to
   // conflict with any other accesses.
   if (tile_0->offsets.empty() || tile_1->offsets.empty())
     return true;
 
-  if (getOffsetFromOffsetsAndStrides(tile_0) !=
-      getOffsetFromOffsetsAndStrides(tile_1))
-    return false;
+  // Compute the linear range [start, end) for an access pattern.
+  // Returns std::nullopt if the range cannot be statically determined.
+  auto getAccessRange =
+      [](partialMemref *tile) -> std::optional<std::pair<int64_t, int64_t>> {
+    int64_t minOffset = 0;
+    int64_t maxOffset = 0;
 
-  // Check if all static offsets, hash mapped by strides, are equal across the
-  // two partialMemrefs.
-  auto buildStrideToVarOffsetsMap =
-      [](partialMemref *tile, DenseMap<unsigned, llvm::SetVector<Value>> &map) {
-        for (unsigned i = 0; i < tile->offsets.size(); i++) {
-          auto constOffset = getConstantIntValue(tile->offsets[i]);
-          auto constStride = getConstantIntValue(tile->strides[i]);
-          if (!constStride)
-            continue;
-          if (constOffset)
-            continue;
-          map[*constStride].insert(tile->offsets[i]);
-        }
-      };
-  DenseMap<unsigned, llvm::SetVector<Value>> strideToVarOffsetsMap;
-  buildStrideToVarOffsetsMap(tile_0, strideToVarOffsetsMap);
-  buildStrideToVarOffsetsMap(tile_1, strideToVarOffsetsMap);
-  // More than 1 unique variadic offsets per stride across the two
-  // partialMemrefs.
-  for (auto &[_, set] : strideToVarOffsetsMap)
-    if (set.size() > 1)
-      return false;
+    for (unsigned i = 0; i < tile->offsets.size(); i++) {
+      auto constOffset = getConstantIntValue(tile->offsets[i]);
+      auto constSize = getConstantIntValue(tile->sizes[i]);
+      auto constStride = getConstantIntValue(tile->strides[i]);
 
+      // If any dimension has non-constant offset, size, or stride,
+      // we cannot determine the exact range - conservatively assume overlap
+      if (!constOffset || !constSize || !constStride)
+        return std::nullopt;
+
+      // For this dimension, compute contribution to min and max offsets
+      // Min is at index 0: offset * stride
+      // Max is at index (size-1): (offset + size - 1) * stride
+      int64_t dimMin = (*constOffset) * (*constStride);
+      int64_t dimMax = (*constOffset + *constSize - 1) * (*constStride);
+
+      // Handle negative strides
+      if (dimMin > dimMax)
+        std::swap(dimMin, dimMax);
+
+      minOffset += dimMin;
+      maxOffset += dimMax;
+    }
+
+    // Return the range [minOffset, maxOffset + 1) - the +1 because end is
+    // exclusive
+    return std::make_pair(minOffset, maxOffset + 1);
+  };
+
+  auto range_0 = getAccessRange(tile_0);
+  auto range_1 = getAccessRange(tile_1);
+
+  // If either range cannot be determined, conservatively assume overlap
+  if (!range_0 || !range_1)
+    return true;
+
+  auto [start_0, end_0] = *range_0;
+  auto [start_1, end_1] = *range_1;
+
+  // Check if ranges are disjoint: [start_0, end_0) and [start_1, end_1)
+  // Disjoint if: end_0 <= start_1 OR end_1 <= start_0
+  if (end_0 <= start_1 || end_1 <= start_0)
+    return false; // Provably no overlap
+
+  // Ranges intersect - there is overlap
   return true;
 }
 
@@ -2707,7 +2811,9 @@ void dependencyTracer::reconnectLoopCarriedDependencyFromOp(Operation *op) {
       scf_par->emitOpError("reduce op is not dependent on any air::WaitAllOp");
 
     // Connect op's async token to scf reduce
-    addAsyncDependencyIfNew(reduce_wait_all, op->getResult(0));
+    auto opToken = getAsyncTokenFromOp(op);
+    if (opToken)
+      addAsyncDependencyIfNew(reduce_wait_all, opToken);
 
     // Recurse with parent
     reconnectLoopCarriedDependencyFromOp(parent);
@@ -2721,22 +2827,35 @@ void dependencyTracer::reconnectLoopCarriedDependencyFromOp(Operation *op) {
     // Get scf for's wait_all op before yield
     auto scf_for_yield =
         dyn_cast<scf::YieldOp>(scf_for.getBody()->getTerminator());
+
+    // The async token is the last operand in the yield
+    Value tokenOperand = scf_for_yield.getOperands().back();
     auto yield_wait_all =
-        dyn_cast<air::WaitAllOp>(scf_for_yield.getOperand(0).getDefiningOp());
+        dyn_cast<air::WaitAllOp>(tokenOperand.getDefiningOp());
     if (!yield_wait_all) {
       OpBuilder b_yield(scf_for_yield);
-      yield_wait_all = b_yield.create<air::WaitAllOp>(
-          scf_for_yield->getLoc(),
+
+      // Preserve all existing yield operands except the last one (token)
+      SmallVector<Value> yieldOperands;
+      auto operands = scf_for_yield.getOperands();
+      yieldOperands.append(operands.begin(), std::prev(operands.end()));
+
+      yield_wait_all = air::WaitAllOp::create(
+          b_yield, scf_for_yield->getLoc(),
           air::AsyncTokenType::get(scf_for_yield->getContext()),
-          SmallVector<Value>{scf_for_yield.getOperand(0)});
-      b_yield.create<scf::YieldOp>(
-          scf_for_yield->getLoc(),
-          SmallVector<Value>{yield_wait_all.getAsyncToken()});
+          SmallVector<Value>{tokenOperand});
+
+      // Append the new wait_all token to the preserved operands
+      yieldOperands.push_back(yield_wait_all.getAsyncToken());
+
+      scf::YieldOp::create(b_yield, scf_for_yield->getLoc(), yieldOperands);
       scf_for_yield->erase();
     }
 
-    // Connect op's async token to scf reduce
-    addAsyncDependencyIfNew(yield_wait_all, op->getResult(0));
+    // Connect op's async token to scf yield
+    auto opToken = getAsyncTokenFromOp(op);
+    if (opToken)
+      addAsyncDependencyIfNew(yield_wait_all, opToken);
 
     // Recurse with parent
     reconnectLoopCarriedDependencyFromOp(parent);

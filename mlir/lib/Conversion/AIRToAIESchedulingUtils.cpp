@@ -76,8 +76,8 @@ AIE::TileOp air::getPhysTileOp(AIE::DeviceOp aie_device, int col, int row) {
     else
       break;
   }
-  return builder.create<AIE::TileOp>(UnknownLoc::get(aie_device.getContext()),
-                                     col, row);
+  return AIE::TileOp::create(builder, UnknownLoc::get(aie_device.getContext()),
+                             col, row);
 }
 
 AIE::LockOp air::allocateLockOp(AIE::DeviceOp aie_device, AIE::TileOp tile,
@@ -109,7 +109,7 @@ AIE::LockOp air::allocateLockOp(AIE::DeviceOp aie_device, AIE::TileOp tile,
   while (dyn_cast_or_null<AIE::TileOp>(t->getNextNode()))
     t = t->getNextNode();
   b.setInsertionPointAfter(t);
-  auto lockOp = b.create<AIE::LockOp>(tile.getLoc(), tile, new_id, init);
+  auto lockOp = AIE::LockOp::create(b, tile.getLoc(), tile, new_id, init);
   if (name)
     lockOp->setAttr(SymbolTable::getSymbolAttrName(), name);
   return lockOp;
@@ -142,8 +142,8 @@ AIE::ExternalBufferOp air::allocateExternalBufferOp(uint64_t &BufferId,
                                                     int x, int y) {
 
   auto builder = OpBuilder::atBlockBegin(device.getBody());
-  AIE::ExternalBufferOp bufferOp = builder.create<AIE::ExternalBufferOp>(
-      builder.getUnknownLoc(), memrefTy, nullptr, nullptr);
+  AIE::ExternalBufferOp bufferOp = AIE::ExternalBufferOp::create(
+      builder, builder.getUnknownLoc(), memrefTy, nullptr, nullptr);
 
   std::stringstream ss =
       generateBufferNameInStringStream("extBuf", BufferId, attr, x, y);
@@ -212,6 +212,41 @@ air::getRepeatCounts(std::vector<Operation *> memcpy_ops) {
         });
     return wrapsAndStridesAllEquivalent;
   };
+
+  // Check if two channel operations are part of an N-buffer rotation pattern.
+  // They are part of the same rotation if:
+  // 1. They belong to the same air.channel declaration
+  // 2. Their memrefs have the same type (shape, element type, memory space)
+  // 3. Their sizes and strides are equivalent (access pattern match)
+  // Note: Unlike chansMappedToEquivalentBDs, this allows different buffer
+  // values as long as they have the same type and access pattern.
+  auto chansPartOfSameRotation = [](air::ChannelInterface chanA,
+                                    air::ChannelInterface chanB) -> bool {
+    // Must use same channel declaration
+    auto chanDeclA = air::getChannelDeclarationThroughSymbol(chanA);
+    auto chanDeclB = air::getChannelDeclarationThroughSymbol(chanB);
+    if (chanDeclA != chanDeclB)
+      return false;
+
+    // Memrefs must have same type (but can be different buffer values)
+    auto memrefTypeA = llvm::cast<MemRefType>(chanA.getMemref().getType());
+    auto memrefTypeB = llvm::cast<MemRefType>(chanB.getMemref().getType());
+    if (memrefTypeA != memrefTypeB)
+      return false;
+
+    // Sizes and strides must match (ignoring offsets which vary per buffer)
+    if (chanA.getSizes().size() != chanB.getSizes().size() ||
+        chanA.getStrides().size() != chanB.getStrides().size())
+      return false;
+
+    auto zipped = llvm::zip_equal(
+        llvm::concat<Value>(chanA.getSizes(), chanA.getStrides()),
+        llvm::concat<Value>(chanB.getSizes(), chanB.getStrides()));
+    return llvm::all_of(zipped, [](std::tuple<Value, Value> pair) {
+      return isEqualConstantIntOrValue(std::get<0>(pair), std::get<1>(pair));
+    });
+  };
+
   auto dmasMappedToEquivalentBDs = [](air::DmaMemcpyNdOp dmaA,
                                       air::DmaMemcpyNdOp dmaB) {
     return OperationEquivalence::isEquivalentTo(
@@ -263,6 +298,47 @@ air::getRepeatCounts(std::vector<Operation *> memcpy_ops) {
   auto uniqueMemcpyIPattern = getUniqueBDPattern(memcpyIOps);
   if (!uniqueMemcpyIPattern.empty())
     memcpyIOps = uniqueMemcpyIPattern;
+
+  // Detect if all operations form an N-buffer rotation pattern.
+  // For N-buffer rotation (e.g., 4-buffer sliding window), we need to generate
+  // a single circular BD chain even if operations have different loop contexts.
+  auto detectNBufferRotation =
+      [&chansPartOfSameRotation](
+          const llvm::SetVector<Operation *> &ops) -> bool {
+    if (ops.size() < 2)
+      return false;
+
+    // Check all ops are channel operations sharing same rotation pattern
+    auto *firstOp = *ops.begin();
+    auto firstChan = dyn_cast<air::ChannelInterface>(firstOp);
+    if (!firstChan)
+      return false;
+
+    // Count unique buffers
+    llvm::DenseSet<Value> uniqueBuffers;
+    for (auto *op : ops) {
+      auto chanOp = dyn_cast<air::ChannelInterface>(op);
+      if (!chanOp || !chansPartOfSameRotation(firstChan, chanOp))
+        return false;
+      uniqueBuffers.insert(chanOp.getMemref());
+    }
+
+    // Valid rotation: multiple unique buffers, total ops divisible by buffer
+    // count
+    unsigned numBuffers = uniqueBuffers.size();
+    return numBuffers >= 2 && ops.size() % numBuffers == 0;
+  };
+
+  // If N-buffer rotation pattern detected, return all ops with same repeat
+  // count. This ensures generateDmaBdProgram() creates a single circular BD
+  // chain (infiniteBDLoopMode = true) instead of separate terminated tasks.
+  if (detectNBufferRotation(memcpyIOps)) {
+    SmallVector<Operation *> opVec = memcpyIOps.takeVector();
+    for (auto *op : opVec) {
+      repeatCounts[0].insert(op);
+    }
+    return repeatCounts;
+  }
 
   // Get the deepest region which is ancestor to all memcpyIOps.
   SmallVector<Operation *> memcpyIOpVec = memcpyIOps.takeVector();
@@ -440,6 +516,8 @@ bool xilinx::air::allocation_info_t::foundAlloc(air::ChannelOp channel_op) {
 }
 
 bool xilinx::air::allocation_info_t::foundAlloc(int32_t col, int32_t row) {
+  if (!getDmaTile())
+    return false;
   if (col == getDmaTile().getCol() && row == getDmaTile().getRow())
     return true;
   return false;
@@ -484,6 +562,22 @@ bool xilinx::air::allocation_info_t::foundAlloc(int32_t col, int32_t row,
                                                 air::ChannelOp channel_op) {
 
   return foundAlloc(col, row) && foundAlloc(channel_op);
+}
+
+// Found existence of a packet flow allocation in provided coordinates.
+bool xilinx::air::allocation_info_t::foundPacketFlowAllocInTile(int32_t col,
+                                                                int32_t row) {
+  if (!foundAlloc(col, row))
+    return false;
+  for (auto o : memcpyOps) {
+    auto memcpy_op = dyn_cast<air::MemcpyInterface>(o);
+    if (!memcpy_op)
+      continue;
+    auto chanTypeRes = air::getChannelType(memcpy_op);
+    if (succeeded(chanTypeRes))
+      return chanTypeRes.value().str() == "dma_packet";
+  }
+  return false;
 }
 
 // DMAAllocator impl.
@@ -732,6 +826,14 @@ air::TileDMAAllocator::simpleDmaChannelAlloc(air::MemcpyInterface &memcpyOp,
     return failure();
   auto allocs = isMM2S.value() ? &mm2s_allocs : &s2mm_allocs;
 
+  // Check if allocating for a packet flow (packet flow supports channel time
+  // multiplexing)
+  bool isPacketFlowOp = false;
+  auto chanTypeRes = getChannelType(memcpyOp);
+  if (succeeded(chanTypeRes)) {
+    isPacketFlowOp = chanTypeRes.value().str() == "dma_packet";
+  }
+
   // Search for existing dma channel allocation
   unsigned num_allocs = 0;
   for (auto &t : *allocs) {
@@ -740,6 +842,12 @@ air::TileDMAAllocator::simpleDmaChannelAlloc(air::MemcpyInterface &memcpyOp,
     if (t.foundAlloc(col, row, memcpyOp))
       return t;
     if (t.foundAlloc(col, row, chan)) {
+      t.memcpyOps.push_back(memcpyOp.getOperation());
+      return t;
+    }
+    // Search for existing packet-flow allocations on this tile, and try to
+    // reuse the channel allocation.
+    if (isPacketFlowOp && t.foundPacketFlowAllocInTile(col, row)) {
       t.memcpyOps.push_back(memcpyOp.getOperation());
       return t;
     }
@@ -767,7 +875,10 @@ air::TileDMAAllocator::getBuffer(uint64_t, int64_t col, int64_t row,
   Value buffer = isTileInbound(memcpyOp, DMAMemorySpaceAsInt).value()
                      ? (memcpyOp.getDstMemref())
                      : (memcpyOp.getSrcMemref());
-  return getUnderlyingBufferOp(buffer);
+  auto bufferOp = getUnderlyingBufferOp(buffer);
+  if (!bufferOp)
+    return failure();
+  return bufferOp;
 }
 
 // ShimDMAAllocator impl.
@@ -968,13 +1079,30 @@ air::MemTileDMAAllocator::simpleDmaChannelAlloc(air::MemcpyInterface &memcpyOp,
     return buffer.value()->emitOpError("failed to get an AIE tile.");
   }
 
+  // Check if allocating for a packet flow (packet flow supports channel time
+  // multiplexing)
+  bool isPacketFlowOp = false;
+  auto chanTypeRes = getChannelType(memcpyOp);
+  if (succeeded(chanTypeRes)) {
+    isPacketFlowOp = chanTypeRes.value().str() == "dma_packet";
+  }
+
   // Search for existing dma channel allocation
   unsigned num_allocs = 0;
   for (auto &t : *allocs) {
     if (t.foundAlloc(tile.getCol(), tile.getRow()))
       num_allocs++;
-    if (t.foundAlloc(tile.getCol(), tile.getRow(), memcpyOp))
+    if (t.foundAlloc(tile.getCol(), tile.getRow(), memcpyOp)) {
+      t.memcpyOps.push_back(memcpyOp.getOperation());
       return t;
+    }
+    // Search for existing packet-flow allocations on this tile, and try to
+    // reuse the channel allocation.
+    if (isPacketFlowOp &&
+        t.foundPacketFlowAllocInTile(tile.getCol(), tile.getRow())) {
+      t.memcpyOps.push_back(memcpyOp.getOperation());
+      return t;
+    }
   }
   // Need to allocate a new one
   int memtile_dma_channels =
@@ -1057,7 +1185,10 @@ air::MemTileDMAAllocator::getBuffer(uint64_t, int64_t col, int64_t row,
   Value buffer = isTileInbound(memcpyOp, DMAMemorySpaceAsInt).value()
                      ? (memcpyOp.getDstMemref())
                      : (memcpyOp.getSrcMemref());
-  return getUnderlyingBufferOp(buffer);
+  auto bufferOp = getUnderlyingBufferOp(buffer);
+  if (!bufferOp)
+    return failure();
+  return bufferOp;
 }
 
 // CascadeAllocator impl.
@@ -1152,7 +1283,10 @@ air::CascadeAllocator::getBuffer(uint64_t, int64_t col, int64_t row,
                      : (memcpyOp.getSrcMemref());
 
   // Resolve the actual underlying buffer op
-  return getUnderlyingBufferOp(buffer);
+  auto bufferOp = getUnderlyingBufferOp(buffer);
+  if (!bufferOp)
+    return failure();
+  return bufferOp;
 }
 
 // MemcpyBundleAsFlow impl.
@@ -1383,6 +1517,9 @@ LogicalResult air::simpleDMAChannelAllocation(
             return memcpyOpIf->emitOpError(
                 "only supports dma_stream or dma_packet connections at L3 "
                 "memory");
+          if (!f.S2MM_alloc[i].getDmaTile())
+            return memcpyOpIf->emitOpError(
+                "failed to get S2MM tile for L3 allocation.");
           auto alloc_res = shim_dma_alloc.allocNewDmaChannel(
               memcpyOpIf, f.S2MM_alloc[i].getDmaTile().getCol(),
               f.S2MM_alloc[i].getDmaTile().getRow(), f.S2MM[i]);
@@ -1407,6 +1544,9 @@ LogicalResult air::simpleDMAChannelAllocation(
             f.memcpyResourceType != "dma_packet")
           return memcpyOpIf->emitOpError("only supports dma_stream or "
                                          "dma_packet connections at L3 memory");
+        if (!f.MM2S_alloc.getDmaTile())
+          return memcpyOpIf->emitOpError(
+              "failed to get MM2S tile for L3 allocation.");
         auto alloc_res = shim_dma_alloc.allocNewDmaChannel(
             memcpyOpIf, f.MM2S_alloc.getDmaTile().getCol(),
             f.MM2S_alloc.getDmaTile().getRow(), f.MM2S);

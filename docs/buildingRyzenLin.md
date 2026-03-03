@@ -7,8 +7,7 @@
 - **Python 3.10+** (required by the wheels)
 - **gcc >= 11**
 - **pip** (Python package manager)
-- **XRT** installed (you must provide the path to your XRT installation)
-- (Optional but recommended) A Python virtual environment
+- **XRT** (optional, required only for running on hardware)
 
 ### Steps
 
@@ -18,17 +17,30 @@
    cd mlir-air
    ```
 
-2. **(Optional) Set up a Python virtual environment:**
+2. **Install the following packages needed for MLIR-AIR:**
    ```bash
-   python3 -m venv sandbox
-   source sandbox/bin/activate
+   sudo apt-get install -y ninja-build clang lld unzip
    ```
 
-3. **Run the build script:**
+3. **Set up a Python virtual environment with the prerequisite python packages :**
    ```bash
-   utils/build-mlir-air-using-wheels.sh <xrt_dir> [build_dir] [install_dir]
+   source utils/setup_python_packages.sh
    ```
-   - `<xrt_dir>`: Path to your XRT installation (required)
+
+4. **Run the build script:**
+   
+   **Without XRT (software-only build):**
+   ```bash
+   ./utils/build-mlir-air-using-wheels.sh [build_dir] [install_dir]
+   ```
+   
+   **With XRT (for hardware execution):**
+   ```bash
+   ./utils/build-mlir-air-using-wheels.sh --xrt-dir <xrt_path> [build_dir] [install_dir]
+   ```
+   
+   Parameters:
+   - `--xrt-dir <xrt_path>`: Path to your XRT installation (optional, only needed for hardware execution)
    - `[build_dir]`: Build directory (optional, default: `build`)
    - `[install_dir]`: Install directory (optional, default: `install`)
 
@@ -38,12 +50,24 @@
    - Install `mlir-aie` dependencies from wheels
    - Clone required CMake modules
    - Configure and build MLIR-AIR using CMake and Ninja
+   - Optionally configure XRT support if `--xrt-dir` is provided
 
-4. **Environment Setup:**
-   The script sets up environment variables for MLIR-AIE, Python, and libraries.  
-   If you start a new terminal, you may need to re-source your Python environment and set variables as needed.
+5. **Environment Setup:**
+   To setup your environment after building:
+   ```bash
+   source utils/env_setup.sh [install_dir] $(python3 -m pip show mlir_aie | grep Location | awk '{print $2}')/mlir_aie $(python3 -m pip show llvm-aie | grep Location | awk '{print $2}')/llvm-aie my_install/mlir
+   ```
+   This command automatically detects the installation directories of the `mlir-aie` and `llvm-aie` Python packages, and sets up environment variables for MLIR-AIR, MLIR-AIE, PEANO (llvm-aie compiler), Python, and MLIR libraries.
+   
+   **If you built with XRT support**, also run:
+   ```bash
+   source [xrt_dir]/setup.sh
+   ```
+   This sets up the PATHs for XRT.
+   
+   If you start a new terminal, you may need to re-source the above setup scripts as needed.
 
-5. **Testing:**
+6. **Testing:**
    After building, you can run tests as follows:
    ```bash
    cd <build_dir>   # default is 'build'
@@ -51,7 +75,10 @@
    ninja check-air-cpp
    ninja check-air-mlir
    ninja check-air-python
-
+   ```
+   
+   **If you built with XRT support**, you can also run XRT/hardware tests:
+   ```bash
    # Run LIT tests (set -DLLVM_EXTERNAL_LIT if needed)
    lit -sv --time-tests --show-unsupported --show-excluded --timeout 600 -j5 test/xrt
 
@@ -68,6 +95,112 @@
 - For LIT tests, you may need to set `-DLLVM_EXTERNAL_LIT` to the path of your `lit` executable.
 - The script installs dependencies using pip and downloads wheels from the official release pages.
 - For advanced troubleshooting or custom builds, see the legacy instructions below.
+
+---
+
+## Running a Quick Example
+
+After building MLIR-AIR, you can try the i8 matrix multiplication example to verify your setup and understand the different compilation workflows. Matmul shapes are configurable in the Makefile.
+
+### Example 1: Hardware-Free Compilation (No XRT Required)
+
+This mode is useful for **cross-compilation** or **development without hardware access**. It generates intermediate compilation artifacts without requiring XRT to be installed:
+
+```bash
+cd programming_examples/matrix_multiplication/i8
+make run4x4 COMPILE_MODE=compile-only
+```
+
+**Expected output:** `Compilation completed successfully!`
+
+**What this does:**
+- Compiles AIR dialect code through the full compilation pipeline
+- Generates intermediate MLIR files and NPU instructions
+- Does **not** generate xclbin (no `xclbinutil` needed)
+- Does **not** require XRT or hardware
+
+**When to use:**
+- Building on a system without XRT installed
+- Cross-compiling for deployment on another system
+- CI/CD pipelines
+- Early development and testing
+
+### Example 2: Full Workflow with Hardware (Default)
+
+If you have XRT and Ryzen AI hardware available, run the complete workflow:
+
+```bash
+cd programming_examples/matrix_multiplication/i8
+make run4x4
+```
+
+**Expected output:** `PASS!`
+
+**What this does:**
+- Compiles the AIR code
+- Generates xclbin and instruction files
+- Loads and executes on NPU hardware
+- Validates results against expected outputs
+
+This is the default mode (`COMPILE_MODE=compile-and-run`) for users with hardware.
+
+### Example 3: Advanced - Profiling with Custom Host Code
+
+For specialized workflows like profiling with custom test executables:
+
+```bash
+make profile
+```
+
+**What this does:**
+- Uses `compile-and-xclbin` mode to generate xclbin and instructions
+- Runs a custom C++ test executable (not xrt_runner) for detailed profiling
+- Useful for performance measurement and custom host integration
+
+The `sweep4x4` target similarly uses `compile-and-xclbin` to benchmark across multiple problem sizes with a custom test harness.
+
+### Additional Examples
+
+**Different herd configurations:**
+```bash
+make run2x2 COMPILE_MODE=compile-only  # 2x2 herd
+make run8x4 COMPILE_MODE=compile-only  # 8x4 herd
+```
+
+**Different architectures:**
+```bash
+make run4x4 AIE_TARGET=aie2p COMPILE_MODE=compile-only  # For NPU2/Strix
+make run4x4 AIE_TARGET=aie2                              # For NPU1/Phoenix (default)
+```
+
+**View generated MLIR:**
+```bash
+make print  # Display MLIR module without compiling
+```
+
+**Clean build artifacts:**
+```bash
+make clean
+```
+
+### Other Data Types
+
+The same patterns work for other matrix multiplication examples:
+- `programming_examples/matrix_multiplication/bf16/` - bfloat16 matrix multiply
+- `programming_examples/matrix_multiplication/i16/` - int16 matrix multiply
+
+### Exploring More Examples
+
+Explore `programming_examples/` for many more examples including:
+- Element-wise operations
+- Softmax
+- Sine/cosine
+- Llama 2-style multi-head attention
+- Flash attention
+- Vector instruction micro-benchmark
+- And more
+
+Most examples follow similar Makefile patterns with `COMPILE_MODE` and `AIE_TARGET` support.
 
 ---
 
@@ -137,12 +270,21 @@ To build MLIR-AIR provide the paths to llvm, cmakeModules, and xrt (here, we ass
 
 To setup your environment after building:
 ```bash
-source utils/env_setup.sh install-xrt/ mlir-aie/install/ llvm/install/
+# If you have llvm-aie (PEANO) installed via pip:
+source utils/env_setup.sh install-xrt/ mlir-aie/install/ $(python3 -m pip show llvm-aie | grep Location | awk '{print $2}')/llvm-aie llvm/install/
+
+# Or if you built llvm-aie from source:
+source utils/env_setup.sh install-xrt/ mlir-aie/install/ /path/to/llvm-aie/install llvm/install/
 ```
 
 Note that if you are starting a new environment (e.g., by creating a new terminal sometime after building), restore your environment with:
 ```bash
-source utils/env_setup.sh install-xrt/ mlir-aie/install/ llvm/install/
+# If you have llvm-aie (PEANO) installed via pip:
+source utils/env_setup.sh install-xrt/ mlir-aie/install/ $(python3 -m pip show llvm-aie | grep Location | awk '{print $2}')/llvm-aie llvm/install/
+source sandbox/bin/activate
+
+# Or if you built llvm-aie from source:
+source utils/env_setup.sh install-xrt/ mlir-aie/install/ /path/to/llvm-aie/install llvm/install/
 source sandbox/bin/activate
 ```
 

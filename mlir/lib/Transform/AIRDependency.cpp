@@ -132,10 +132,16 @@ public:
           createAsyncDMA(rewriter, op);
         else if (isa<air::ChannelInterface>(op))
           createAsyncChannel(rewriter, op);
-        else if (isa<linalg::LinalgOp, func::CallOp, memref::DeallocOp,
-                     memref::CopyOp>(op))
+        else if (isa<linalg::LinalgOp, func::CallOp, memref::DeallocOp>(op))
           createAsyncExecute(rewriter, op);
-        else if (auto hierarchy_op = dyn_cast<air::HierarchyInterface>(op))
+        else if (isa<memref::CopyOp>(op)) {
+          // Skip wrapping memref.copy in air.execute when inside scf.if,
+          // as the resulting async token would not dominate uses outside
+          // the enclosing loop. L1-to-L1 copies are synchronous and don't
+          // need async tracking.
+          if (!op->getParentOfType<scf::IfOp>())
+            createAsyncExecute(rewriter, op);
+        } else if (auto hierarchy_op = dyn_cast<air::HierarchyInterface>(op))
           createAsyncHierarchyImpls(rewriter, hierarchy_op);
         // Create async execute region for memref.alloc
         else if (auto memalloc_op = dyn_cast<memref::AllocOp>(op)) {
@@ -316,6 +322,8 @@ public:
 
     auto getYieldedTokens = [&](Region &region) {
       SmallVector<Value, 1> yielded_tokens;
+      if (region.empty())
+        return yielded_tokens;
       for (auto async_op : region.getOps<air::AsyncOpInterface>()) {
         auto token = async_op.getAsyncToken();
         if (!token)
@@ -328,14 +336,20 @@ public:
       for (auto child_for_op : region.front().getOps<scf::ForOp>()) {
         if (child_for_op.getNumResults() == 0)
           continue;
-        auto token = child_for_op.getResult(0);
+        // Get the async token from the loop using the generic helper
+        auto token = air::getAsyncTokenFromOp(child_for_op);
+        if (!token)
+          continue; // Loop is not async, skip it
         if (isOnlyUsedByNoLoopCarryOpsInBlock(token, &region.front()))
           yielded_tokens.push_back(token);
       }
       for (auto child_parallel_op : region.front().getOps<scf::ParallelOp>()) {
         if (child_parallel_op.getNumResults() == 0)
           continue;
-        auto token = child_parallel_op.getResult(0);
+        // Get the async token from the loop using the generic helper
+        auto token = air::getAsyncTokenFromOp(child_parallel_op);
+        if (!token)
+          continue; // Loop is not async, skip it
         if (isOnlyUsedByNoLoopCarryOpsInBlock(token, &region.front()))
           yielded_tokens.push_back(token);
       }
@@ -373,6 +387,8 @@ public:
           auto new_branch_op = createAsyncRegionBranchOp(rewriter, branch_op);
           auto new_regions = (*new_branch_op)->getRegions();
           for (unsigned i = 0; i < new_regions.size(); i++) {
+            if (new_regions[i].empty())
+              continue;
             insertLoopCarriedDepsInRegion(rewriter, new_regions[i],
                                           yielded_tokens_per_region[i]);
           }
@@ -422,8 +438,8 @@ private:
     auto loc = op->getLoc();
     SmallVector<Value, 1> deps;
     air::ExecuteOp async_region;
-    async_region = rewriter.create<air::ExecuteOp>(
-        loc, air::AsyncTokenType::get(op->getContext()), deps);
+    async_region = air::ExecuteOp::create(
+        rewriter, loc, air::AsyncTokenType::get(op->getContext()), deps);
     assignOpId(async_region);
 
     // Insert op to the new async execute region's body.
@@ -448,7 +464,7 @@ private:
     }
 
     rewriter.clone(*op);
-    rewriter.create<air::ExecuteTerminatorOp>(rewriter.getUnknownLoc());
+    air::ExecuteTerminatorOp::create(rewriter, rewriter.getUnknownLoc());
 
     // Update op-to-graph map
     updateAsyncExecuteGraphWithNewNode(async_region, asyncExecuteGraph);
@@ -470,8 +486,8 @@ private:
     auto loc = op->getLoc();
     SmallVector<Value, 1> deps;
     air::ExecuteOp async_region;
-    async_region = rewriter.create<air::ExecuteOp>(
-        loc, air::AsyncTokenType::get(op->getContext()),
+    async_region = air::ExecuteOp::create(
+        rewriter, loc, air::AsyncTokenType::get(op->getContext()),
         op->getResults().getType(), deps);
     assignOpId(async_region);
 
@@ -479,8 +495,8 @@ private:
     Block *async_region_bb = rewriter.createBlock(&async_region.getRegion());
     rewriter.setInsertionPointToStart(async_region_bb);
     auto op_cloned = rewriter.clone(*op);
-    rewriter.create<air::ExecuteTerminatorOp>(rewriter.getUnknownLoc(),
-                                              op_cloned->getResults());
+    air::ExecuteTerminatorOp::create(rewriter, rewriter.getUnknownLoc(),
+                                     op_cloned->getResults());
     SmallVector<Value, 1> returnVals;
     for (auto val : async_region.getResults()) {
       returnVals.push_back(val);
@@ -504,8 +520,8 @@ private:
     auto loc = op->getLoc();
     SmallVector<Value, 1> deps;
     auto dma_op = mlir::dyn_cast<air::DmaMemcpyNdOp>(op);
-    air::DmaMemcpyNdOp new_dmaNd_op = rewriter.create<air::DmaMemcpyNdOp>(
-        loc, air::AsyncTokenType::get(dma_op->getContext()), deps,
+    air::DmaMemcpyNdOp new_dmaNd_op = air::DmaMemcpyNdOp::create(
+        rewriter, loc, air::AsyncTokenType::get(dma_op->getContext()), deps,
         dma_op.getDstMemref(), dma_op.getDstOffsets(), dma_op.getDstSizes(),
         dma_op.getDstStrides(), dma_op.getSrcMemref(), dma_op.getSrcOffsets(),
         dma_op.getSrcSizes(), dma_op.getSrcStrides());
@@ -527,9 +543,9 @@ private:
     SmallVector<Value, 1> deps;
     std::string event_name = "";
     if (auto channel_put_op = dyn_cast<air::ChannelPutOp>(op)) {
-      air::ChannelPutOp new_channel_put_op = rewriter.create<air::ChannelPutOp>(
-          loc, air::AsyncTokenType::get(channel_put_op->getContext()), deps,
-          channel_put_op.getChanName(), channel_put_op.getIndices(),
+      air::ChannelPutOp new_channel_put_op = air::ChannelPutOp::create(
+          rewriter, loc, air::AsyncTokenType::get(channel_put_op->getContext()),
+          deps, channel_put_op.getChanName(), channel_put_op.getIndices(),
           channel_put_op.getSrc(), channel_put_op.getSrcOffsets(),
           channel_put_op.getSrcSizes(), channel_put_op.getSrcStrides());
       assignOpId(new_channel_put_op);
@@ -537,9 +553,9 @@ private:
       // Update op-to-graph map
       updateAsyncExecuteGraphWithNewNode(new_channel_put_op, asyncExecuteGraph);
     } else if (auto channel_get_op = dyn_cast<air::ChannelGetOp>(op)) {
-      air::ChannelGetOp new_channel_get_op = rewriter.create<air::ChannelGetOp>(
-          loc, air::AsyncTokenType::get(channel_get_op->getContext()), deps,
-          channel_get_op.getChanName(), channel_get_op.getIndices(),
+      air::ChannelGetOp new_channel_get_op = air::ChannelGetOp::create(
+          rewriter, loc, air::AsyncTokenType::get(channel_get_op->getContext()),
+          deps, channel_get_op.getChanName(), channel_get_op.getIndices(),
           channel_get_op.getDst(), channel_get_op.getDstOffsets(),
           channel_get_op.getDstSizes(), channel_get_op.getDstStrides());
       assignOpId(new_channel_get_op);
@@ -607,8 +623,8 @@ private:
                          SmallVector<Value, 1> deps, SmallVector<Value, 4> args,
                          SmallVector<Value, 4> constants) {
     auto loc = op->getLoc();
-    T new_op = rewriter.create<T>(loc, deps, op.getSizeOperands(), args, true,
-                                  op->getAttrs());
+    T new_op = T::create(rewriter, loc, deps, op.getSizeOperands(), args, true,
+                         op->getAttrs());
     assignOpId(new_op);
 
     auto &bb = new_op.getBody().front();
@@ -1024,12 +1040,17 @@ private:
   air::WaitAllOp insertWaitAllOpBeforeLoopYield(
       OpBuilder &builder, Region &region,
       SmallVector<Value, 1> yielded_tokens_in_loop_op) {
-    // Create one wait_all event at the end of current loop body.
-    // Output token of wait_all shall be yielded
-    builder.setInsertionPointToEnd(&region.front());
-    air::WaitAllOp wait_all_op_yielded = builder.create<air::WaitAllOp>(
-        builder.getUnknownLoc(), air::AsyncTokenType::get(builder.getContext()),
-        yielded_tokens_in_loop_op);
+    // Create one wait_all event at the end of current loop body, BEFORE the
+    // terminator Output token of wait_all shall be yielded
+    if (region.front().mightHaveTerminator()) {
+      builder.setInsertionPoint(region.front().getTerminator());
+    } else {
+      builder.setInsertionPointToEnd(&region.front());
+    }
+    air::WaitAllOp wait_all_op_yielded =
+        air::WaitAllOp::create(builder, builder.getUnknownLoc(),
+                               air::AsyncTokenType::get(builder.getContext()),
+                               yielded_tokens_in_loop_op);
     wait_all_op_yielded->setAttr(
         "id",
         mlir::IntegerAttr::get(mlir::IntegerType::get(builder.getContext(), 32),
@@ -1086,8 +1107,8 @@ private:
     // Create a new wait_all event before the for op which collects the incoming
     // deps. Output token of wait_all shall be the iter_arg of for op.
     builder.setInsertionPoint(loop_op);
-    air::WaitAllOp wait_all_op_before_loop = builder.create<air::WaitAllOp>(
-        builder.getUnknownLoc(),
+    air::WaitAllOp wait_all_op_before_loop = air::WaitAllOp::create(
+        builder, builder.getUnknownLoc(),
         air::AsyncTokenType::get(loop_op->getContext()), incoming_tokens);
     wait_all_op_before_loop->setAttr(
         "id",
@@ -1123,24 +1144,34 @@ private:
                                   air::WaitAllOp wait_all_op_before_loop,
                                   SmallVector<Value, 4> incoming_tokens,
                                   SmallVector<Value, 4> constants) {
-    // Create new for op with iter_args.
-    SmallVector<Value, 4> merged_incoming_token;
-    merged_incoming_token.push_back(wait_all_op_before_loop.getResult(0));
-    scf::ForOp new_loop_op = rewriter.create<scf::ForOp>(
-        loop_op.getLoc(), loop_op.getLowerBound(), loop_op.getUpperBound(),
-        loop_op.getStep(), merged_incoming_token);
+    // Preserve existing iter_args and add async token as additional iter_arg
+    SmallVector<Value> all_init_args;
+    all_init_args.append(loop_op.getInitArgs().begin(),
+                         loop_op.getInitArgs().end());
+    all_init_args.push_back(wait_all_op_before_loop.getResult(0));
+
+    scf::ForOp new_loop_op = scf::ForOp::create(
+        rewriter, loop_op.getLoc(), loop_op.getLowerBound(),
+        loop_op.getUpperBound(), loop_op.getStep(), all_init_args);
 
     if (auto attr = loop_op->getAttrOfType<StringAttr>(
             SymbolTable::getSymbolAttrName()))
       new_loop_op->setAttr(SymbolTable::getSymbolAttrName(), attr);
 
-    // Splice the operations inside loop op
+    // Splice the operations inside loop op INCLUDING the terminator
     auto &bb = new_loop_op.getBody()->getOperations();
     auto &body = loop_op.getBody()->getOperations();
-    bb.splice(bb.begin(), body, body.begin(), --body.end());
+    bb.splice(bb.begin(), body, body.begin(), body.end());
 
+    // Replace old induction variable and existing iter_args
     auto iv = loop_op.getInductionVar();
     iv.replaceAllUsesWith(new_loop_op.getInductionVar());
+
+    for (unsigned i = 0; i < loop_op.getRegionIterArgs().size(); i++) {
+      loop_op.getRegionIterArgs()[i].replaceAllUsesWith(
+          new_loop_op.getRegionIterArgs()[i]);
+    }
+
     rewriter.setInsertionPointToStart(new_loop_op.getBody());
     for (auto c : constants) {
       replaceAllUsesInRegionWith(
@@ -1148,15 +1179,18 @@ private:
           new_loop_op.getRegion());
     }
 
+    // Get the async token iter_arg (now the last one since we appended it)
+    Value asyncTokenIterArg =
+        air::getLoopCarriedTokenFromScfOp(new_loop_op, "argument");
+
     for (Value v : incoming_tokens) {
-      replaceAllUsesInRegionWith(v, new_loop_op.getRegionIterArgs()[0],
-                                 new_loop_op.getRegion());
+      replaceAllUsesInRegionWith(v, asyncTokenIterArg, new_loop_op.getRegion());
     }
 
     // Connect sources in loop body with iter_args
     for (auto async_op : new_loop_op.getOps<air::AsyncOpInterface>()) {
       if (!isNotLoopCarriedOp(async_op)) {
-        addAsyncDependencyIfNew(async_op, new_loop_op.getRegionIterArgs()[0]);
+        addAsyncDependencyIfNew(async_op, asyncTokenIterArg);
       }
     }
 
@@ -1175,9 +1209,9 @@ private:
     // Create new parallel op with init_val.
     SmallVector<Value, 4> merged_incoming_token;
     merged_incoming_token.push_back(wait_all_op_before_loop.getResult(0));
-    scf::ParallelOp new_loop_op = rewriter.create<scf::ParallelOp>(
-        loop_op.getLoc(), loop_op.getLowerBound(), loop_op.getUpperBound(),
-        loop_op.getStep(), merged_incoming_token);
+    scf::ParallelOp new_loop_op = scf::ParallelOp::create(
+        rewriter, loop_op.getLoc(), loop_op.getLowerBound(),
+        loop_op.getUpperBound(), loop_op.getStep(), merged_incoming_token);
 
     if (auto attr = loop_op->getAttrOfType<StringAttr>(
             SymbolTable::getSymbolAttrName()))
@@ -1241,8 +1275,8 @@ private:
     // Create new if op with a yielded async token.
     SmallVector<Type> yielded_tys = {
         air::AsyncTokenType::get(rewriter.getContext())};
-    scf::IfOp new_branch_op = rewriter.create<scf::IfOp>(
-        branch_op.getLoc(), yielded_tys, branch_op.getCondition(),
+    scf::IfOp new_branch_op = scf::IfOp::create(
+        rewriter, branch_op.getLoc(), yielded_tys, branch_op.getCondition(),
         /*withElseRegion*/ (bool)branch_op.elseBlock());
 
     if (auto attr = branch_op->getAttrOfType<StringAttr>(
@@ -1253,6 +1287,8 @@ private:
     auto old_regions = branch_op->getRegions();
     auto new_regions = new_branch_op->getRegions();
     for (auto [o_r, n_r] : llvm::zip_equal(old_regions, new_regions)) {
+      if (o_r.empty() || n_r.empty())
+        continue;
       auto &bb = n_r.front().getOperations();
       auto &body = o_r.front().getOperations();
       bb.splice(bb.begin(), body, body.begin(), --body.end());
@@ -1266,8 +1302,8 @@ private:
     // Create new if op with a yielded async token.
     SmallVector<Type> yielded_tys = {
         air::AsyncTokenType::get(rewriter.getContext())};
-    affine::AffineIfOp new_branch_op = rewriter.create<affine::AffineIfOp>(
-        branch_op.getLoc(), yielded_tys, branch_op.getIntegerSet(),
+    affine::AffineIfOp new_branch_op = affine::AffineIfOp::create(
+        rewriter, branch_op.getLoc(), yielded_tys, branch_op.getIntegerSet(),
         branch_op.getOperands(),
         /*withElseRegion*/ (bool)branch_op.hasElse());
 
@@ -1296,8 +1332,14 @@ private:
       SmallPtrSet<Operation *, 1> keep;
       if (source->getNumResults() == 0)
         continue;
-      if (source->getResult(0)) {
-        for (auto sink : source->getResult(0).getUsers()) {
+
+      // Get the async token from the source operation
+      Value tokenResult = air::getAsyncTokenFromOp(source.getOperation());
+      if (!tokenResult)
+        continue; // No token result, skip elevation
+
+      if (tokenResult) {
+        for (auto sink : tokenResult.getUsers()) {
           // Keep token if source already dominates sink
           if (source->getParentOp()->isAncestor(sink)) {
             keep.insert(sink);
@@ -1306,9 +1348,10 @@ private:
             insertVertexBetweenTwoOps(source.getOperation(), sink, wait_all_op);
           }
         }
+        // Only replace the token result, not other results
+        tokenResult.replaceAllUsesExcept(
+            region.getParentOp()->getResults().back(), keep);
       }
-      source->getResult(0).replaceAllUsesExcept(
-          region.getParentOp()->getResult(0), keep);
     }
   }
 
@@ -1347,7 +1390,9 @@ private:
                                    RegionBranchOpInterface>(
                        v.getDefiningOp())) {
           auto v_op = v.getDefiningOp();
-          if (v_op->getNumResults() > 0 && v_op->getResult(0) == v)
+          // Check if v is an async token from this op
+          auto token = air::getAsyncTokenFromOp(v_op);
+          if (token && token == v)
             incoming_tokens.push_back(v);
         }
       }
@@ -1359,6 +1404,12 @@ private:
     // (3) Create new for op with iter_args.
     scf::ForOp new_loop_op = convertScfForToAsync(
         rewriter, loop_op, wait_all_op_before_loop, incoming_tokens, constants);
+
+    // Replace old loop's results with new loop's corresponding results
+    // The new loop has: [existing results..., async token result]
+    for (unsigned i = 0; i < loop_op.getNumResults(); i++) {
+      loop_op.getResult(i).replaceAllUsesWith(new_loop_op.getResult(i));
+    }
 
     if (eraseOpWithCheck(rewriter, loop_op, "insertLoopCarriedDeps").failed()) {
       signalPassFailure();
@@ -1387,7 +1438,9 @@ private:
                                    RegionBranchOpInterface>(
                        v.getDefiningOp())) {
           auto v_op = v.getDefiningOp();
-          if (v_op->getNumResults() > 0 && v_op->getResult(0) == v)
+          // Check if v is an async token from this op
+          auto token = air::getAsyncTokenFromOp(v_op);
+          if (token && token == v)
             incoming_tokens.push_back(v);
         }
       }
@@ -1430,6 +1483,8 @@ private:
     llvm::SetVector<Value> region_args;
     auto regions = branch_op->getRegions();
     for (auto &region : regions) {
+      if (region.empty())
+        continue;
       getUsedValuesDefinedAbove(region, region_args);
       for (Value v : region_args) {
         if (isa_and_present<arith::ConstantOp, ub::PoisonOp>(v.getDefiningOp()))
@@ -1443,7 +1498,9 @@ private:
                                      RegionBranchOpInterface>(
                          v.getDefiningOp())) {
             auto v_op = v.getDefiningOp();
-            if (v_op->getNumResults() > 0 && v_op->getResult(0) == v)
+            // Check if v is an async token from this op
+            auto token = air::getAsyncTokenFromOp(v_op);
+            if (token && token == v)
               incoming_tokens.push_back(v);
           }
         }
@@ -1485,7 +1542,9 @@ private:
                                      RegionBranchOpInterface>(
                          v.getDefiningOp())) {
             auto v_op = v.getDefiningOp();
-            if (v_op->getNumResults() > 0 && v_op->getResult(0) == v)
+            // Check if v is an async token from this op
+            auto token = air::getAsyncTokenFromOp(v_op);
+            if (token && token == v)
               incoming_tokens.push_back(v);
           }
         }
@@ -1530,11 +1589,24 @@ private:
     wa_to_g[wait_all_op_yielded.getId()] = wait_all_op_yielded_v;
 
     if (isa<scf::ForOp, scf::IfOp>(region.getParentOp())) {
-      // Yield an async token
-      SmallVector<Value, 4> yield_token;
-      yield_token.push_back(wait_all_op_yielded.getResult(0));
+      // For scf::ForOp and scf::IfOp, preserve existing yield values and append
+      // async token
+      SmallVector<Value, 4> yield_values;
+
+      // Get existing yield if it exists and extract its operands
+      if (region.front().mightHaveTerminator()) {
+        if (auto old_yield = dyn_cast_if_present<scf::YieldOp>(
+                region.front().getTerminator())) {
+          yield_values.append(old_yield.getOperands().begin(),
+                              old_yield.getOperands().end());
+          rewriter.eraseOp(old_yield);
+        }
+      }
+
+      // Append the async token
+      yield_values.push_back(wait_all_op_yielded.getResult(0));
       rewriter.setInsertionPointToEnd(&region.front());
-      rewriter.create<scf::YieldOp>(rewriter.getUnknownLoc(), yield_token);
+      scf::YieldOp::create(rewriter, rewriter.getUnknownLoc(), yield_values);
     }
 
     else if (isa<scf::ParallelOp>(region.getParentOp())) {
@@ -1556,8 +1628,8 @@ private:
       SmallVector<Value, 4> yield_token;
       yield_token.push_back(wait_all_op_yielded.getResult(0));
       rewriter.setInsertionPointToEnd(&region.front());
-      rewriter.create<affine::AffineYieldOp>(rewriter.getUnknownLoc(),
-                                             yield_token);
+      affine::AffineYieldOp::create(rewriter, rewriter.getUnknownLoc(),
+                                    yield_token);
     }
 
     // Elevating tokens from inside forOp body to the yielded token, to maintain
@@ -1702,27 +1774,41 @@ private:
       uint64_t dstTRVertex = getGraphGVertexFromAIROp(op);
       for (auto TRVertex :
            asyncExecuteGraph.inverseAdjacentVertices(dstTRVertex)) {
-        if (asyncExecuteGraph[TRVertex].asyncEventType == "execute")
-          async_op.addAsyncDependency(
-              getExecuteOpFromVertex(TRVertex, asyncExecuteGraph, opIdToOpMap)
-                  .getResult(0));
-        else if (asyncExecuteGraph[TRVertex].asyncEventType == "dma")
-          async_op.addAsyncDependency(
-              getDmaOpFromVertex(TRVertex, asyncExecuteGraph, opIdToOpMap)
-                  .getOperation()
-                  ->getResult(0));
-        else if (asyncExecuteGraph[TRVertex].asyncEventType == "channel")
-          async_op.addAsyncDependency(
+        Operation *srcOp = nullptr;
+        Value depToken;
+        if (asyncExecuteGraph[TRVertex].asyncEventType == "execute") {
+          auto execOp =
+              getExecuteOpFromVertex(TRVertex, asyncExecuteGraph, opIdToOpMap);
+          srcOp = execOp.getOperation();
+          depToken = execOp.getResult(0);
+        } else if (asyncExecuteGraph[TRVertex].asyncEventType == "dma") {
+          srcOp = getDmaOpFromVertex(TRVertex, asyncExecuteGraph, opIdToOpMap)
+                      .getOperation();
+          depToken = srcOp->getResult(0);
+        } else if (asyncExecuteGraph[TRVertex].asyncEventType == "channel") {
+          srcOp =
               getChannelOpFromVertex(TRVertex, asyncExecuteGraph, opIdToOpMap)
-                  .getOperation()
-                  ->getResult(0));
-        else if (asyncExecuteGraph[TRVertex].asyncEventType == "hierarchy")
-          async_op.addAsyncDependency(
-              getHierOpFromVertex(TRVertex, asyncExecuteGraph, opIdToOpMap)
-                  .getOperation()
-                  ->getResult(0));
-        else
+                  .getOperation();
+          depToken = srcOp->getResult(0);
+        } else if (asyncExecuteGraph[TRVertex].asyncEventType == "hierarchy") {
+          srcOp = getHierOpFromVertex(TRVertex, asyncExecuteGraph, opIdToOpMap)
+                      .getOperation();
+          depToken = srcOp->getResult(0);
+        } else {
           op->emitOpError("unknown async event type");
+          continue;
+        }
+        // Skip dependency if the source op is inside an scf.if that does
+        // not contain the sink op. The token defined inside scf.if cannot
+        // dominate ops outside it; the 4th traversal (loop-carried deps)
+        // will handle this by threading the token through iter_args.
+        if (srcOp) {
+          if (auto ifOp = srcOp->getParentOfType<scf::IfOp>()) {
+            if (!ifOp->isAncestor(op))
+              continue;
+          }
+        }
+        async_op.addAsyncDependency(depToken);
       }
     } else
       op->emitOpError("operation has no async interface");

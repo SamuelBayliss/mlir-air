@@ -81,9 +81,9 @@ static LogicalResult canonicalizeHierarchyOpArgs(T op,
     return failure();
 
   IRMapping remap;
-  auto newOp = rewriter.create<T>(op.getLoc(), op.getAsyncDependencies(),
-                                  op.getSizeOperands(), newOperands,
-                                  op->getNumResults() > 0, op->getAttrs());
+  auto newOp = T::create(rewriter, op.getLoc(), op.getAsyncDependencies(),
+                         op.getSizeOperands(), newOperands,
+                         op->getNumResults() > 0, op->getAttrs());
 
   rewriter.setInsertionPointToStart(&newOp.getBody().front());
   for (auto p : llvm::zip(op.getSize(), newOp.getSize()))
@@ -492,10 +492,14 @@ CanonicalizeAsyncLoopCarriedDepsInRegion(OpT op, PatternRewriter &rewriter) {
     for (auto tok : regionTokens)
       replaceAllUsesInRegionWith(tok, loopCarriedTokenArg, forOp.getRegion());
     rewriter.setInsertionPoint(forOp);
-    regionTokens.insert(forOp.getInitArgs().begin(), forOp.getInitArgs().end());
-    auto newWaitAll = rewriter.create<air::WaitAllOp>(
-        forOp->getLoc(), air::AsyncTokenType::get(forOp->getContext()),
-        regionTokens.takeVector());
+    for (auto arg : forOp.getInitArgs()) {
+      if (isa<air::AsyncTokenType>(arg.getType()))
+        regionTokens.insert(arg);
+    }
+    auto newWaitAll =
+        air::WaitAllOp::create(rewriter, forOp->getLoc(),
+                               air::AsyncTokenType::get(forOp->getContext()),
+                               regionTokens.takeVector());
     forOp
         .getInitsMutable()[loopCarriedTokenArg.getArgNumber() -
                            forOp.getNumInductionVars()]
@@ -1032,6 +1036,38 @@ unsigned air::SegmentOp::getNumDims() {
   return segment_sizes[1];
 }
 
+/// Utility function to verify that all memref.alloc operations within a region
+/// have a memory space greater than or equal to the specified minimum.
+/// Returns failure if any alloc violates the constraint.
+template <typename OpT>
+static LogicalResult verifyAllocMemorySpace(OpT op, unsigned minMemorySpace,
+                                            StringRef opName) {
+  WalkResult result =
+      op.getBody().walk([&](memref::AllocOp allocOp) -> WalkResult {
+        auto memrefType = allocOp.getType();
+        // Get memory space (defaults to 0 if not specified)
+        unsigned memorySpace = memrefType.getMemorySpaceAsInt();
+
+        if (memorySpace < minMemorySpace) {
+          allocOp.emitOpError()
+              << "memref.alloc inside " << opName
+              << " must have memory space >= " << minMemorySpace
+              << ", but found memory space " << memorySpace;
+          return WalkResult::interrupt();
+        }
+        return WalkResult::advance();
+      });
+
+  if (result.wasInterrupted())
+    return failure();
+
+  return success();
+}
+
+LogicalResult air::SegmentOp::verify() {
+  return verifyAllocMemorySpace(*this, /*minMemorySpace=*/1, "air.segment");
+}
+
 //
 // HerdOp
 //
@@ -1307,6 +1343,10 @@ uint64_t air::HerdOp::getNumRows() {
   return cast<arith::ConstantIndexOp>(rows).value();
 }
 
+LogicalResult air::HerdOp::verify() {
+  return verifyAllocMemorySpace(*this, /*minMemorySpace=*/2, "air.herd");
+}
+
 //
 // Asynchronous execute
 //
@@ -1359,13 +1399,25 @@ static LogicalResult FoldExecute(air::ExecuteOp op, PatternRewriter &rewriter) {
 
   // if we get here then only the async token result has uses.
 
+  // Don't fold if body contains ops with memory write side effects
+  // (e.g., memref.store). These ops must be preserved even if the
+  // execute's async token becomes unused due to wait_all folding.
+  for (auto &bodyOp : body.without_terminator()) {
+    if (auto memEffects = dyn_cast<MemoryEffectOpInterface>(bodyOp)) {
+      SmallVector<MemoryEffects::EffectInstance> effects;
+      memEffects.getEffects(effects);
+      for (auto &effect : effects)
+        if (isa<MemoryEffects::Write>(effect.getEffect()))
+          return failure();
+    }
+  }
+
   // if there are extra results than async token, and none of them are used,
   // then replace the execute with a wait_all no-op.
   if (op->getNumResults() > 1) {
     op.getResult(0).replaceAllUsesWith(
-        rewriter
-            .create<air::WaitAllOp>(op->getLoc(), op->getResult(0).getType(),
-                                    op->getOperands())
+        air::WaitAllOp::create(rewriter, op->getLoc(),
+                               op->getResult(0).getType(), op->getOperands())
             .getResult(0));
     rewriter.eraseOp(op);
     return success();
@@ -1698,7 +1750,7 @@ static void combineMixedOffsetsInPlace(
       AffineMap map = AffineMap::get(/*dimCount=*/0,
                                      /*symCount=*/affineOperands.size(), expr);
       offsets[i] =
-          rewriter.create<affine::AffineApplyOp>(loc, map, affineOperands)
+          affine::AffineApplyOp::create(rewriter, loc, map, affineOperands)
               .getResult();
       continue;
     }
@@ -1708,12 +1760,12 @@ static void combineMixedOffsetsInPlace(
     if (opOffsetAttr) {
       Value opOffCst =
           makeIndexCst(mlir::cast<IntegerAttr>(opOffsetAttr).getInt());
-      mulTerm = rewriter.create<arith::MulIOp>(loc, opOffCst, sourceStride);
+      mulTerm = arith::MulIOp::create(rewriter, loc, opOffCst, sourceStride);
     } else {
       Value opOffsetVal = mlir::cast<Value>(opOffset);
-      mulTerm = rewriter.create<arith::MulIOp>(loc, opOffsetVal, sourceStride);
+      mulTerm = arith::MulIOp::create(rewriter, loc, opOffsetVal, sourceStride);
     }
-    offsets[i] = rewriter.create<arith::AddIOp>(loc, sourceOffset, mulTerm);
+    offsets[i] = arith::AddIOp::create(rewriter, loc, sourceOffset, mulTerm);
   }
 }
 
@@ -2052,7 +2104,7 @@ SmallVector<Value> materializeOpFoldResultAsValues(ArrayRef<OpFoldResult> ofrs,
       // Create an arith.constant if the OpFoldResult is an Attribute.
       auto constAttr = cast<IntegerAttr>(attr);
       values.push_back(
-          builder.create<arith::ConstantIndexOp>(loc, constAttr.getInt()));
+          arith::ConstantIndexOp::create(builder, loc, constAttr.getInt()));
     }
   }
   return values;
@@ -2172,9 +2224,10 @@ FailureOr<TilingResult> getTiledImplementationFromChanIf(
   // attributes.
   air::AsyncOpInterface asyncIf =
       dyn_cast<air::AsyncOpInterface>(op.getOperation());
-  PutGetTy tiledOp = builder.create<PutGetTy>(
-      op.getLoc(), op->getResultTypes(), asyncIf.getAsyncDependencies(),
-      op.getChanName(), op.getIndices(), inputSlice->getResult(0),
+  PutGetTy tiledOp = PutGetTy::create(
+      builder, op.getLoc(), op->getResultTypes(),
+      asyncIf.getAsyncDependencies(), op.getChanName(), op.getIndices(),
+      inputSlice->getResult(0),
       materializeOpFoldResultAsValues(offsets, op.getLoc(), builder),
       materializeOpFoldResultAsValues(sizes, op.getLoc(), builder),
       materializeOpFoldResultAsValues(strides, op.getLoc(), builder));

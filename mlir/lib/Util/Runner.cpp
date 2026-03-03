@@ -87,9 +87,10 @@ class AIRRunner::AIRRunner_impl {
 
 public:
   AIRRunner_impl(llvm::raw_ostream &trace_stream, llvm::json::Value &json_model,
-                 std::string sim_granularity = "herd", bool verbose = false)
+                 std::string sim_granularity = "herd",
+                 std::string launch_iterations = "all", bool verbose = false)
       : traceStream(trace_stream), jsonModel(json_model),
-        sim_granularity(sim_granularity) {
+        sim_granularity(sim_granularity), launch_iterations(launch_iterations) {
 
     auto model = jsonModel.getAsObject();
 
@@ -223,6 +224,9 @@ public:
         uint64_t compute_xfer_cost = 0;
         uint64_t compute_op_cost = getComputeCostFromCostModel(d, child_op);
         execution_time = std::max(compute_op_cost, compute_xfer_cost);
+        // Add extra cycles as base latency for linalg ops, to model the
+        // overhead of external function.
+        execution_time += 100;
       } else if (auto custom_op = dyn_cast<air::CustomOp>(child_op)) {
         execution_time = getComputeCostFromJSON(d, custom_op);
       }
@@ -379,17 +383,24 @@ public:
     auto device_resource_node = device(model);
 
     uint64_t time = 1;
+    int64_t iter_count = 1;
     for (auto &launchGraph : hostGraph.subgraphs) {
 
       // air launch iteration space
-      int64_t iter_count = 1;
+      iter_count = 1;
       auto launch_op = dyn_cast<air::LaunchOp>(launchGraph.hierarchyOp);
       for (auto s_op : launch_op.getSizeOperands()) {
         int64_t s = cast<arith::ConstantIndexOp>(s_op.getDefiningOp()).value();
         iter_count *= s;
       }
 
-      for (unsigned i = 0; i < iter_count; i++) {
+      // Determine iteration count based on launch_iterations option
+      int64_t actual_iter_count = iter_count;
+      if (launch_iterations == "single") {
+        actual_iter_count = 1;
+      }
+
+      for (unsigned i = 0; i < actual_iter_count; i++) {
 
         // Reset controllers
         launch_runner_node = runnerNode(nullptr, &launchGraph, "launch",
@@ -407,7 +418,15 @@ public:
 
     // Simulation performance report
     std::string end_ts = convertToTimeStampInStr(time, device_resource_node);
-    std::cout << "Latency: " << end_ts << "us\n";
+    if (launch_iterations == "single" && iter_count > 1) {
+      // In single-iteration mode, multiply by total iteration count
+      double latency_us = std::stod(end_ts) * iter_count;
+      std::cout << "Latency (single-iteration mode, estimated for "
+                << iter_count << " iterations): " << latency_us << "us\n";
+    } else {
+      // All-iterations mode or single iteration total
+      std::cout << "Latency (all-iterations mode): " << end_ts << "us\n";
+    }
   }
 
   void scheduleLaunch(runnerNode &launch, device &device_resource_node,
@@ -482,6 +501,7 @@ private:
   llvm::raw_ostream &traceStream;
   llvm::json::Value &jsonModel;
   std::string sim_granularity;
+  std::string launch_iterations;
 
   unsigned dispatch_slots;
   unsigned dispatch_dma_slots;
@@ -753,9 +773,9 @@ private:
 
 AIRRunner::AIRRunner(llvm::raw_ostream &trace_stream,
                      llvm::json::Value &json_model, std::string sim_granularity,
-                     bool verbose) {
-  impl = std::make_unique<AIRRunner_impl>(trace_stream, json_model,
-                                          sim_granularity, verbose);
+                     std::string launch_iterations, bool verbose) {
+  impl = std::make_unique<AIRRunner_impl>(
+      trace_stream, json_model, sim_granularity, launch_iterations, verbose);
   if (verbose) {
     llvm::DebugFlag = true;
     llvm::setCurrentDebugType(DEBUG_TYPE);

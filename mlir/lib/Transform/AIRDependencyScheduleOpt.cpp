@@ -501,8 +501,8 @@ private:
       // blocking, an air.wait_all barrier needs to be inserted here
       builder.setInsertionPointAfter(for_candidate);
       SmallVector<Value> dep_list = {};
-      air::WaitAllOp wa_op = builder.create<xilinx::air::WaitAllOp>(
-          builder.getUnknownLoc(),
+      air::WaitAllOp wa_op = xilinx::air::WaitAllOp::create(
+          builder, builder.getUnknownLoc(),
           air::AsyncTokenType::get(for_candidate->getContext()), dep_list);
       replaceAllUsesInRegionWith(for_candidate->getResult(0),
                                  wa_op.getAsyncToken(), *op->getParentRegion());
@@ -599,9 +599,9 @@ private:
       replaceAllUsesInRegionWith(asyncToken, deps[0], region);
     } else if (deps.size() > 1) {
       builder.setInsertionPoint(async_op);
-      air::WaitAllOp wa = builder.create<xilinx::air::WaitAllOp>(
-          async_op->getLoc(), air::AsyncTokenType::get(async_op->getContext()),
-          deps);
+      air::WaitAllOp wa = xilinx::air::WaitAllOp::create(
+          builder, async_op->getLoc(),
+          air::AsyncTokenType::get(async_op->getContext()), deps);
       replaceAllUsesInRegionWith(asyncToken, wa.getAsyncToken(), region);
     }
 
@@ -652,9 +652,9 @@ FailureOr<air::HerdOp> hoistAIRHerdInForImpl(air::HerdOp herdOp,
   }
   auto forRegionIterOperands = outerMostLoop.getOperands().drop_front(
       outerMostLoop.getNumControlOperands());
-  auto newHerdOp = builder.create<air::HerdOp>(
-      loc, forRegionIterOperands, herdOp.getSizeOperands(), herdOperands, true,
-      herdOp->getAttrs());
+  auto newHerdOp = air::HerdOp::create(builder, loc, forRegionIterOperands,
+                                       herdOp.getSizeOperands(), herdOperands,
+                                       true, herdOp->getAttrs());
   outerMostLoop->moveBefore(newHerdOp.getBody().front().getTerminator());
   builder.setInsertionPoint(outerMostLoop);
   for (unsigned i = 0; i < sparseKernelArgIndices.size(); i++)
@@ -671,9 +671,8 @@ FailureOr<air::HerdOp> hoistAIRHerdInForImpl(air::HerdOp herdOp,
       return failure();
     }
     auto newAsyncToken =
-        builder
-            .create<air::WaitAllOp>(loc, air::AsyncTokenType::get(ctx),
-                                    SmallVector<Value>{})
+        air::WaitAllOp::create(builder, loc, air::AsyncTokenType::get(ctx),
+                               SmallVector<Value>{})
             .getAsyncToken();
     remap.map(val, newAsyncToken);
   }
@@ -692,13 +691,31 @@ FailureOr<air::HerdOp> hoistAIRHerdInForImpl(air::HerdOp herdOp,
   auto &body = herdOp.getBody().front().getOperations();
   bb.splice(bb.begin(), body, body.begin(), --body.end());
 
+  // Connect spliced body ops with the inner-most loop's loop-carried token, to
+  // synchronize the herd body operations with the inner-most loop's
+  // loop-carried dependency.
+  if (air::isAsyncOp(innerMostLoop)) {
+    for (auto &bodyOp : innerMostLoop.getBody()->without_terminator()) {
+      if (!air::getAsyncDependenciesFromOp(&bodyOp).empty())
+        continue;
+      addAsyncDependencyIfNew(&bodyOp, air::getLoopCarriedTokenFromScfOp(
+                                           innerMostLoop, "argument"));
+    }
+    // Generate a wait_all op that collects all dangling async tokens in the
+    // loop body.
+    auto waitAllOp = generateWaitAllToTerminateBlock(
+        *innerMostLoop.getBody(), builder, /*isBlocking*/ false);
+    // Assign the wait_all token to the loop's terminator (scf.yield).
+    innerMostLoop.getBody()->getTerminator()->getOpOperand(0).assign(
+        waitAllOp.getAsyncToken());
+  }
+
   builder.setInsertionPoint(herdOp);
   for (auto res : herdOp->getResults())
-    remap.map(res,
-              builder
-                  .create<air::WaitAllOp>(loc, air::AsyncTokenType::get(ctx),
+    remap.map(res, air::WaitAllOp::create(builder, loc,
+                                          air::AsyncTokenType::get(ctx),
                                           SmallVector<Value>{})
-                  .getAsyncToken());
+                       .getAsyncToken());
   for (unsigned i = 0; i < herdOp.getNumDims(); i++) {
     remap.map(herdOp.getIds()[i], newHerdOp.getIds()[i]);
     remap.map(herdOp.getSize()[i], newHerdOp.getSize()[i]);
@@ -768,8 +785,9 @@ struct MergeAIRHerdsPattern : public OpRewritePattern<air::HerdOp> {
       kernelOperands.insert(h.getKernelOperands().begin(),
                             h.getKernelOperands().end());
     rewriter.setInsertionPointAfter(herdsWithSameName.back());
-    auto newMergedHerd = rewriter.create<air::HerdOp>(
-        herdOp->getLoc(), herdsWithSameName.back().getAsyncDependencies(),
+    auto newMergedHerd = air::HerdOp::create(
+        rewriter, herdOp->getLoc(),
+        herdsWithSameName.back().getAsyncDependencies(),
         herdOp.getSizeOperands(), kernelOperands.takeVector(),
         (bool)herdOp.getAsyncToken(), herdOp->getAttrs());
     rewriter.setInsertionPointToStart(&newMergedHerd.getBody().front());
@@ -991,8 +1009,8 @@ struct ConstructPingPongDependencyPattern
     auto alloc_pong_exec = dyn_cast<air::ExecuteOp>(alloc_execs[1]);
     auto alloc_ping_token = alloc_ping_exec.getAsyncToken();
     auto alloc_pong_token = alloc_pong_exec.getAsyncToken();
-    air::WaitAllOp ping_pong_token_wait = rewriter.create<air::WaitAllOp>(
-        rewriter.getUnknownLoc(),
+    air::WaitAllOp ping_pong_token_wait = air::WaitAllOp::create(
+        rewriter, rewriter.getUnknownLoc(),
         air::AsyncTokenType::get(rewriter.getContext()),
         SmallVector<Value>{alloc_ping_token, alloc_pong_token});
     SmallVector<Value> upstream_tokens = alloc_pong_exec.getAsyncDependencies();
@@ -1071,7 +1089,6 @@ struct ConstructPingPongDependencyPattern
     }
     for (auto sink : pong_producer_fronts) {
       // "Pong" producers
-      clearAsyncDependenciesOfAsyncOp(sink);
       addAsyncDependencyIfNew(sink, new_loop_op.getRegionIterArgs()[1]);
       for (auto source : ping_producer_backs) {
         Value token = getTokenFromOutermostParentAffineIfOp(source);
@@ -1105,7 +1122,7 @@ struct ConstructPingPongDependencyPattern
       if (!v)
         return failure();
     }
-    rewriter.create<scf::YieldOp>(new_loop_op.getLoc(), yield_operands);
+    scf::YieldOp::create(rewriter, new_loop_op.getLoc(), yield_operands);
 
     for_op.erase();
 
@@ -1152,9 +1169,9 @@ private:
                                SmallVector<Value, 1> iter_operands) const {
 
     builder.setInsertionPoint(loop_op);
-    scf::ForOp new_loop_op = builder.create<scf::ForOp>(
-        loop_op.getLoc(), loop_op.getLowerBound(), loop_op.getUpperBound(),
-        loop_op.getStep(), iter_operands);
+    scf::ForOp new_loop_op = scf::ForOp::create(
+        builder, loop_op.getLoc(), loop_op.getLowerBound(),
+        loop_op.getUpperBound(), loop_op.getStep(), iter_operands);
 
     if (auto attr = loop_op->getAttrOfType<StringAttr>(
             SymbolTable::getSymbolAttrName()))
@@ -1223,8 +1240,8 @@ private:
         token = getTokenFromOutermostParentAffineIfOp(op);
         push_back_if_unique<Value>(wa_operands, token);
       }
-      auto wa = builder.create<air::WaitAllOp>(
-          builder.getUnknownLoc(),
+      auto wa = air::WaitAllOp::create(
+          builder, builder.getUnknownLoc(),
           air::AsyncTokenType::get(builder.getContext()), wa_operands);
       token = wa.getAsyncToken();
     } else if (vec.size() == 1) {
@@ -1356,6 +1373,10 @@ private:
 struct LabelScfForLoopForPingPongPattern : public OpRewritePattern<scf::ForOp> {
   using OpRewritePattern<scf::ForOp>::OpRewritePattern;
 
+  LabelScfForLoopForPingPongPattern(MLIRContext *ctx,
+                                    std::string omitMemorySpace)
+      : OpRewritePattern(ctx), omitMemorySpace(omitMemorySpace) {}
+
   LogicalResult matchAndRewrite(scf::ForOp for_op,
                                 PatternRewriter &rewriter) const override {
 
@@ -1373,6 +1394,29 @@ struct LabelScfForLoopForPingPongPattern : public OpRewritePattern<scf::ForOp> {
     if (alloc_ops.empty())
       return failure();
 
+    // Check if we should skip this loop based on memory space
+    if (!omitMemorySpace.empty()) {
+      bool shouldSkip = false;
+      for (auto op : alloc_ops) {
+        auto alloc_op = dyn_cast<memref::AllocOp>(op);
+        if (!alloc_op)
+          continue;
+        auto memref_type = llvm::cast<MemRefType>(alloc_op.getType());
+        int memorySpace = memref_type.getMemorySpaceAsInt();
+
+        // Check if this alloc's memory space matches the omit criteria
+        if ((omitMemorySpace == "L1" &&
+             memorySpace == (int)air::MemorySpace::L1) ||
+            (omitMemorySpace == "L2" &&
+             memorySpace == (int)air::MemorySpace::L2)) {
+          shouldSkip = true;
+          break;
+        }
+      }
+      if (shouldSkip)
+        return failure();
+    }
+
     // Label the scf.for loop and all its child memref.allocs
     int unroll_factor = 2; // Unroll factor hardened as 2. TODO: add support for
                            // an arbitrary factor.
@@ -1385,6 +1429,7 @@ struct LabelScfForLoopForPingPongPattern : public OpRewritePattern<scf::ForOp> {
   }
 
 private:
+  std::string omitMemorySpace;
 };
 
 struct LabelScfForLoopInAIRSegment : public OpRewritePattern<scf::ForOp> {
@@ -1460,7 +1505,7 @@ struct UnrollScfParallel : public OpRewritePattern<scf::ParallelOp> {
       SmallVector<Value> positionVals;
       for (unsigned i = 0; i < position.size(); i++) {
         positionVals.push_back(
-            rewriter.create<arith::ConstantIndexOp>(loc, position[i]));
+            arith::ConstantIndexOp::create(rewriter, loc, position[i]));
         remap.map(par.getInductionVars()[i], positionVals[i]);
       }
 
@@ -1475,16 +1520,17 @@ struct UnrollScfParallel : public OpRewritePattern<scf::ParallelOp> {
       for (auto reducedOper : terminator->getOperands())
         if (isa<air::AsyncTokenType>(reducedOper.getType()))
           tokens.push_back(reducedOper);
-      auto newWaitAll = rewriter.create<air::WaitAllOp>(
-          loc, air::AsyncTokenType::get(rewriter.getContext()),
+      auto newWaitAll = air::WaitAllOp::create(
+          rewriter, loc, air::AsyncTokenType::get(rewriter.getContext()),
           lookupOrDefaultRange(tokens, remap));
       yieldedTokens.push_back(newWaitAll.getAsyncToken());
     }
 
     // Scf.parallel returned token
     if (par->getNumResults()) {
-      auto newWaitAll = rewriter.create<air::WaitAllOp>(
-          loc, air::AsyncTokenType::get(rewriter.getContext()), yieldedTokens);
+      auto newWaitAll = air::WaitAllOp::create(
+          rewriter, loc, air::AsyncTokenType::get(rewriter.getContext()),
+          yieldedTokens);
       par->getResult(0).replaceAllUsesWith(newWaitAll.getAsyncToken());
     }
 
@@ -1512,25 +1558,32 @@ FailureOr<scf::ForOp> updateScfForBounds(RewriterBase &rewriter,
 
   Value lbVal, ubVal, stepVal;
   if (isa<IntegerType>(type)) {
-    lbVal = rewriter.create<arith::ConstantOp>(
-        loc, type, rewriter.getIntegerAttr(type, lb));
-    ubVal = rewriter.create<arith::ConstantOp>(
-        loc, type, rewriter.getIntegerAttr(type, ub));
-    stepVal = rewriter.create<arith::ConstantOp>(
-        loc, type, rewriter.getIntegerAttr(type, step));
+    lbVal = arith::ConstantOp::create(rewriter, loc, type,
+                                      rewriter.getIntegerAttr(type, lb));
+    ubVal = arith::ConstantOp::create(rewriter, loc, type,
+                                      rewriter.getIntegerAttr(type, ub));
+    stepVal = arith::ConstantOp::create(rewriter, loc, type,
+                                        rewriter.getIntegerAttr(type, step));
   } else if (isa<IndexType>(type)) {
-    lbVal = rewriter.create<arith::ConstantIndexOp>(loc, lb);
-    ubVal = rewriter.create<arith::ConstantIndexOp>(loc, ub);
-    stepVal = rewriter.create<arith::ConstantIndexOp>(loc, step);
+    lbVal = arith::ConstantIndexOp::create(rewriter, loc, lb);
+    ubVal = arith::ConstantIndexOp::create(rewriter, loc, ub);
+    stepVal = arith::ConstantIndexOp::create(rewriter, loc, step);
   } else {
     loopOp->emitOpError("Expected index or integer type, but got: ") << type;
     return failure();
   }
 
-  auto newFor = rewriter.create<scf::ForOp>(loc, lbVal, ubVal, stepVal,
-                                            loopOp.getInitArgs());
+  auto newFor = scf::ForOp::create(rewriter, loc, lbVal, ubVal, stepVal,
+                                   loopOp.getInitArgs());
   auto &bb = newFor.getBody()->getOperations();
   auto &body = loopOp.getBody()->getOperations();
+  // The new ForOp is created with a default terminator.
+  // Erase it before splicing the old body, which has its own terminator.
+  // This preserves any operands the old yield might have (for iter_args).
+  if (!bb.empty() && bb.back().hasTrait<OpTrait::IsTerminator>() &&
+      !body.empty() && body.back().hasTrait<OpTrait::IsTerminator>()) {
+    bb.back().erase();
+  }
   bb.splice(bb.begin(), body, body.begin(), body.end());
   rewriter.replaceAllUsesWith(loopOp.getInductionVar(),
                               newFor.getInductionVar());
@@ -1568,6 +1621,59 @@ LogicalResult eraseOpFromScfFor(RewriterBase &rewriter, scf::ForOp sfo,
   return success();
 }
 
+// Utility function to fold a single affine.apply op into scf.for loop bounds.
+// Returns success if the transformation was applied.
+static FailureOr<scf::ForOp> foldSingleAffineApplyIntoScfForBounds(
+    scf::ForOp sfo, affine::AffineApplyOp apply, RewriterBase &rewriter) {
+  auto ctx = apply->getContext();
+
+  if (apply.getAffineMap().getNumInputs() != 1)
+    return failure();
+  auto val = apply->getOperand(0);
+  auto ivArg = llvm::dyn_cast<BlockArgument>(val);
+  if (!ivArg)
+    return failure();
+  if (!ivArg.getOwner())
+    return failure();
+  if (ivArg.getOwner()->getParentOp() != sfo.getOperation())
+    return failure();
+  if (!val.hasOneUse())
+    return failure();
+  if (apply.getResult().use_empty())
+    return failure();
+  if (auto exec_apply = dyn_cast<air::ExecuteOp>(apply->getParentOp()))
+    if (exec_apply->getResult(1).use_empty())
+      return failure();
+
+  if (!getStaticScfForTripCountAsInt(sfo))
+    return failure();
+  int tripCount = *getStaticScfForTripCountAsInt(sfo);
+  auto new_ub = air::evaluateConstantsInMap(
+      apply.getAffineMap(),
+      SmallVector<std::optional<int64_t>>{
+          *mlir::getConstantIntValue(sfo.getUpperBound())},
+      ctx);
+  auto new_lb = air::evaluateConstantsInMap(
+      apply.getAffineMap(),
+      SmallVector<std::optional<int64_t>>{
+          *mlir::getConstantIntValue(sfo.getLowerBound())},
+      ctx);
+  if (!new_lb) {
+    apply->emitOpError("failed to evaluate lower bound.");
+    return failure();
+  }
+  if (!new_ub) {
+    apply->emitOpError("failed to evaluate upper bound.");
+    return failure();
+  }
+  int newStepInInt = llvm::divideCeilSigned(*new_ub - *new_lb, tripCount);
+  auto valueType = apply.getResult().getType();
+  if (failed(eraseOpFromScfFor(rewriter, sfo, apply)))
+    return failure();
+  return updateScfForBounds(rewriter, sfo, *new_lb, *new_ub, newStepInInt,
+                            valueType);
+}
+
 // Fold affine.apply op operating on loop induction variable into loop bounds.
 struct CanonicalizeAffineApplyOnLoopInductionVar
     : public OpRewritePattern<affine::AffineApplyOp> {
@@ -1597,35 +1703,7 @@ struct CanonicalizeAffineApplyOnLoopInductionVar
 
     // Apply affine map to loop step and bound
     if (auto sfo = dyn_cast<scf::ForOp>(containingOp)) {
-      if (!getStaticScfForTripCountAsInt(sfo))
-        return failure();
-      int tripCount = *getStaticScfForTripCountAsInt(sfo);
-      auto new_ub = air::evaluateConstantsInMap(
-          apply.getAffineMap(),
-          SmallVector<std::optional<int64_t>>{
-              *mlir::getConstantIntValue(sfo.getUpperBound())},
-          ctx);
-      auto new_lb = air::evaluateConstantsInMap(
-          apply.getAffineMap(),
-          SmallVector<std::optional<int64_t>>{
-              *mlir::getConstantIntValue(sfo.getLowerBound())},
-          ctx);
-      if (!new_lb) {
-        apply->emitOpError("failed to evaluate lower bound.");
-        return failure();
-      }
-      if (!new_ub) {
-        apply->emitOpError("failed to evaluate upper bound.");
-        return failure();
-      }
-      int newStepInInt = llvm::divideCeilSigned(*new_ub - *new_lb, tripCount);
-      auto valueType = apply.getResult().getType();
-      if (failed(eraseOpFromScfFor(rewriter, sfo, apply)))
-        return failure();
-      auto res = updateScfForBounds(rewriter, sfo, *new_lb, *new_ub,
-                                    newStepInInt, valueType);
-      if (failed(res))
-        return failure();
+      return foldSingleAffineApplyIntoScfForBounds(sfo, apply, rewriter);
     } else if (auto afo = dyn_cast<affine::AffineForOp>(containingOp)) {
       if (!afo.hasConstantBounds())
         return failure();
@@ -1846,8 +1924,11 @@ struct CanonicalizeArithIndexCastOpOnLoopInductionVar
     if (auto exec = dyn_cast<air::ExecuteOp>(op->getParentOp()))
       if (exec->getResult(1).use_empty())
         return failure();
-    if (isa<scf::ForOp>(ivArg.getOwner()->getParentOp())) {
-      containingOp = ivArg.getOwner()->getParentOp();
+    if (auto containingScfFor =
+            dyn_cast<scf::ForOp>(ivArg.getOwner()->getParentOp())) {
+      if (containingScfFor.getInductionVar() != ivArg)
+        return failure();
+      containingOp = containingScfFor;
       var_val = val;
     } else if (isa<affine::AffineForOp>(ivArg.getOwner()->getParentOp())) {
       // Affine for op only operates on index type.
@@ -1942,8 +2023,8 @@ struct AIRSpecializeChannelWrapAndStrideInScfFor
     // Whether repeat (i.e. stride = 0) is supported at highest dimension.
     if (enableRepeatAtHighestDim && !wraps.empty()) {
       // Force bump up number of dims to maxNumDims.
-      auto zeroIdx = rewriter.create<arith::ConstantIndexOp>(loc, 0);
-      auto oneIdx = rewriter.create<arith::ConstantIndexOp>(loc, 1);
+      auto zeroIdx = arith::ConstantIndexOp::create(rewriter, loc, 0);
+      auto oneIdx = arith::ConstantIndexOp::create(rewriter, loc, 1);
       while ((int)offsets.size() < maxNumDims) {
         offsets.insert(offsets.begin(), zeroIdx);
       }
@@ -2020,16 +2101,16 @@ struct AIRSpecializeChannelWrapAndStrideInScfFor
 
     // Create specialized air.channel.put/get.
     if (isa<air::ChannelPutOp>(channel_op))
-      new_chan_op = rewriter.create<air::ChannelPutOp>(
-          loc, tys, deps, channel_op.getChanName(),
+      new_chan_op = air::ChannelPutOp::create(
+          rewriter, loc, tys, deps, channel_op.getChanName(),
           air::lookupOrDefaultRange(channel_op.getIndices(), remap),
           air::lookupOrDefaultRange(channel_op.getMemref(), remap),
           air::lookupOrDefaultRange(offsets, remap),
           air::lookupOrDefaultRange(wraps, remap),
           air::lookupOrDefaultRange(strides, remap));
     else if (isa<air::ChannelGetOp>(channel_op))
-      new_chan_op = rewriter.create<air::ChannelGetOp>(
-          loc, tys, deps, channel_op.getChanName(),
+      new_chan_op = air::ChannelGetOp::create(
+          rewriter, loc, tys, deps, channel_op.getChanName(),
           air::lookupOrDefaultRange(channel_op.getIndices(), remap),
           air::lookupOrDefaultRange(channel_op.getMemref(), remap),
           air::lookupOrDefaultRange(offsets, remap),
@@ -2212,16 +2293,16 @@ struct AIRSpecializeChannelWrapAndStrideInAffineFor
 
     // Create specialized air.channel.put/get.
     if (isa<air::ChannelPutOp>(channel_op))
-      new_chan_op = rewriter.create<air::ChannelPutOp>(
-          loc, tys, deps, channel_op.getChanName(),
+      new_chan_op = air::ChannelPutOp::create(
+          rewriter, loc, tys, deps, channel_op.getChanName(),
           air::lookupOrDefaultRange(channel_op.getIndices(), remap),
           air::lookupOrDefaultRange(channel_op.getMemref(), remap),
           air::lookupOrDefaultRange(offsets, remap),
           air::lookupOrDefaultRange(wraps, remap),
           air::lookupOrDefaultRange(strides, remap));
     else if (isa<air::ChannelGetOp>(channel_op))
-      new_chan_op = rewriter.create<air::ChannelGetOp>(
-          loc, tys, deps, channel_op.getChanName(),
+      new_chan_op = air::ChannelGetOp::create(
+          rewriter, loc, tys, deps, channel_op.getChanName(),
           air::lookupOrDefaultRange(channel_op.getIndices(), remap),
           air::lookupOrDefaultRange(channel_op.getMemref(), remap),
           air::lookupOrDefaultRange(offsets, remap),
@@ -2236,9 +2317,10 @@ struct AIRSpecializeChannelWrapAndStrideInAffineFor
                 .getAsyncToken());
       }
     }
-    rewriter.replaceAllUsesWith(for_op.getInductionVar(),
-                                rewriter.create<arith::ConstantIndexOp>(
-                                    loc, for_op.getConstantLowerBound()));
+    rewriter.replaceAllUsesWith(
+        for_op.getInductionVar(),
+        arith::ConstantIndexOp::create(rewriter, loc,
+                                       for_op.getConstantLowerBound()));
     rewriter.eraseOp(for_op.getOperation());
 
     return success();
@@ -2314,8 +2396,9 @@ struct AIRCanonicalizeChannelPutGetOpWrapAndStrideList
       //  - size   = 1
       //  - stride = 0
       if (highestDimRepeatActive) {
-        auto zeroIdx = rewriter.create<arith::ConstantIndexOp>(op->getLoc(), 0);
-        auto oneIdx = rewriter.create<arith::ConstantIndexOp>(op->getLoc(), 1);
+        auto zeroIdx =
+            arith::ConstantIndexOp::create(rewriter, op->getLoc(), 0);
+        auto oneIdx = arith::ConstantIndexOp::create(rewriter, op->getLoc(), 1);
         while ((int)offsets.size() < maxNumDims) {
           offsets.insert(offsets.begin() + 1, zeroIdx);
         }
@@ -2365,9 +2448,9 @@ public:
 
     // Update channel declaration
     sizes[chanDim] *= factor;
-    builder.create<air::ChannelOp>(op->getLoc(), chan_op.getSymName().str(),
-                                   builder.getI64ArrayAttr(sizes),
-                                   builder.getStringAttr("dma_stream"));
+    air::ChannelOp::create(builder, op->getLoc(), chan_op.getSymName().str(),
+                           builder.getI64ArrayAttr(sizes),
+                           builder.getStringAttr("dma_stream"));
 
     // Add scf.parallel to unroll channel puts and gets
     auto puts = air::getChannelPutOpThroughSymbol(chan_op);
@@ -2407,17 +2490,16 @@ private:
       return nullptr;
     } else if (async_op.getAsyncDependencies().empty()) {
       SmallVector<Value> dep_list = {};
-      return builder
-          .create<air::WaitAllOp>(
-              op->getLoc(), air::AsyncTokenType::get(builder.getContext()),
-              dep_list)
+      return air::WaitAllOp::create(
+                 builder, op->getLoc(),
+                 air::AsyncTokenType::get(builder.getContext()), dep_list)
           .getAsyncToken();
     } else if (async_op.getAsyncDependencies().size() == 1)
       return async_op.getAsyncDependencies().front();
-    return builder
-        .create<air::WaitAllOp>(op->getLoc(),
-                                air::AsyncTokenType::get(builder.getContext()),
-                                async_op.getAsyncDependencies())
+    return air::WaitAllOp::create(
+               builder, op->getLoc(),
+               air::AsyncTokenType::get(builder.getContext()),
+               async_op.getAsyncDependencies())
         .getAsyncToken();
   }
 
@@ -2433,19 +2515,19 @@ private:
     SmallVector<Value, 1> merged_incoming_token = {init_val};
     SmallVector<Value, 1> LBs, UBs, Steps;
 
-    LBs.push_back(builder.create<arith::ConstantIndexOp>(loc, 0));
-    UBs.push_back(builder.create<arith::ConstantIndexOp>(loc, factor));
-    Steps.push_back(builder.create<arith::ConstantIndexOp>(loc, 1));
+    LBs.push_back(arith::ConstantIndexOp::create(builder, loc, 0));
+    UBs.push_back(arith::ConstantIndexOp::create(builder, loc, factor));
+    Steps.push_back(arith::ConstantIndexOp::create(builder, loc, 1));
 
-    auto par = builder.create<scf::ParallelOp>(loc, LBs, UBs, Steps,
-                                               merged_incoming_token);
+    auto par = scf::ParallelOp::create(builder, loc, LBs, UBs, Steps,
+                                       merged_incoming_token);
 
     builder.setInsertionPointToStart(par.getBody());
 
     // Update channel indices
     SmallVector<Value, 1> new_channel_idx = {};
     if (op.getIndices().empty()) {
-      auto const_0 = builder.create<arith::ConstantIndexOp>(par->getLoc(), 0);
+      auto const_0 = arith::ConstantIndexOp::create(builder, par->getLoc(), 0);
       new_channel_idx = {const_0, const_0};
       new_channel_idx[dim] = par.getInductionVars()[0];
     } else
@@ -2457,7 +2539,7 @@ private:
       auto memTy = llvm::cast<BaseMemRefType>(op.getMemref().getType());
       for (auto d : getTensorShape(memTy)) {
         new_sizes.push_back(
-            builder.create<arith::ConstantIndexOp>(par->getLoc(), d));
+            arith::ConstantIndexOp::create(builder, par->getLoc(), d));
       }
     }
     auto size_op = new_sizes[dim].getDefiningOp();
@@ -2465,34 +2547,34 @@ private:
       auto val = cIOp.value();
       val = llvm::divideCeilSigned(val, factor);
       new_sizes[dim] =
-          builder.create<arith::ConstantIndexOp>(par->getLoc(), val);
+          arith::ConstantIndexOp::create(builder, par->getLoc(), val);
     } else {
-      new_sizes[dim] = builder.create<arith::FloorDivSIOp>(
-          par->getLoc(), new_sizes[dim],
-          builder.create<arith::ConstantIndexOp>(par->getLoc(), factor));
+      new_sizes[dim] = arith::FloorDivSIOp::create(
+          builder, par->getLoc(), new_sizes[dim],
+          arith::ConstantIndexOp::create(builder, par->getLoc(), factor));
     }
     // Update offset (+ induction var. x size)
     SmallVector<Value, 1> new_offsets = op.getOffsets();
     if (new_offsets.empty()) {
-      auto const_0 = builder.create<arith::ConstantIndexOp>(par->getLoc(), 0);
+      auto const_0 = arith::ConstantIndexOp::create(builder, par->getLoc(), 0);
       new_offsets = {const_0, const_0};
     }
-    auto prod = builder.create<arith::MulIOp>(
-        par->getLoc(), new_channel_idx[dim], new_sizes[dim]);
+    auto prod = arith::MulIOp::create(builder, par->getLoc(),
+                                      new_channel_idx[dim], new_sizes[dim]);
     new_offsets[dim] =
-        builder.create<arith::AddIOp>(par->getLoc(), new_offsets[dim], prod);
+        arith::AddIOp::create(builder, par->getLoc(), new_offsets[dim], prod);
     // Update strides
     SmallVector<Value, 1> new_strides = op.getStrides();
     if (new_strides.empty()) {
-      auto const_1 = builder.create<arith::ConstantIndexOp>(par->getLoc(), 1);
+      auto const_1 = arith::ConstantIndexOp::create(builder, par->getLoc(), 1);
       new_strides = {const_1, const_1};
     }
 
     // Create new channel op
     SmallVector<Type, 1> tys = {air::AsyncTokenType::get(builder.getContext())};
-    auto new_op = builder.create<T>(
-        par.getLoc(), tys, merged_incoming_token, op.getChanName(),
-        new_channel_idx, op.getMemref(), new_offsets, new_sizes, new_strides);
+    auto new_op = T::create(builder, par.getLoc(), tys, merged_incoming_token,
+                            op.getChanName(), new_channel_idx, op.getMemref(),
+                            new_offsets, new_sizes, new_strides);
 
     // Create scf::ReduceOp
     air::createSCFReduceForAsyncSCFParallel(
@@ -2502,9 +2584,9 @@ private:
     // event
     builder.setInsertionPointAfter(par);
     SmallVector<Value, 1> barrier_deps = {par.getResults().front()};
-    auto barrier = builder.create<air::WaitAllOp>(
-        builder.getUnknownLoc(), air::AsyncTokenType::get(builder.getContext()),
-        barrier_deps);
+    auto barrier = air::WaitAllOp::create(
+        builder, builder.getUnknownLoc(),
+        air::AsyncTokenType::get(builder.getContext()), barrier_deps);
 
     // Reconnect dependencies
     op.getAsyncToken().replaceAllUsesWith(barrier.getAsyncToken());
@@ -3087,7 +3169,8 @@ public:
   void runOptPatterns(func::FuncOp funcOp) {
     MLIRContext *ctx = funcOp.getContext();
     RewritePatternSet patterns(&getContext());
-    patterns.insert<LabelScfForLoopForPingPongPattern>(ctx);
+    // Use the clOmitMemorySpace option from the pass
+    patterns.insert<LabelScfForLoopForPingPongPattern>(ctx, clOmitMemorySpace);
     (void)applyPatternsGreedily(funcOp, std::move(patterns));
   }
 
@@ -3416,7 +3499,7 @@ public:
         return;
       OpBuilder builder(fop);
       fop->getOpOperand(0).assign(
-          builder.create<arith::ConstantIndexOp>(fop->getLoc(), *setLB));
+          arith::ConstantIndexOp::create(builder, fop->getLoc(), *setLB));
       clearAttrsInBlk(fop.getBody(), "setLB");
     });
     f.walk([getNewBoundValue, clearAttrsInBlk](scf::ForOp fop) {
@@ -3425,7 +3508,7 @@ public:
         return;
       OpBuilder builder(fop);
       fop->getOpOperand(1).assign(
-          builder.create<arith::ConstantIndexOp>(fop->getLoc(), *setUB));
+          arith::ConstantIndexOp::create(builder, fop->getLoc(), *setUB));
       clearAttrsInBlk(fop.getBody(), "setUB");
     });
   }
@@ -3579,29 +3662,28 @@ private:
       IRMapping remap;
       auto loc = op->getLoc();
       auto ctx = op->getContext();
-      auto zeroIdx = builder.create<arith::ConstantIndexOp>(loc, 0);
-      auto oneIdx = builder.create<arith::ConstantIndexOp>(loc, 1);
+      auto zeroIdx = arith::ConstantIndexOp::create(builder, loc, 0);
+      auto oneIdx = arith::ConstantIndexOp::create(builder, loc, 1);
       auto newForOp = scf::ForOp();
 
       if (air::getAsyncTokenFromOp(op)) {
-        newForOp = builder.create<scf::ForOp>(
-            loc, zeroIdx, oneIdx, oneIdx,
-            builder
-                .create<air::WaitAllOp>(loc, air::AsyncTokenType::get(ctx),
-                                        air::getAsyncDependenciesFromOp(op))
+        newForOp = scf::ForOp::create(
+            builder, loc, zeroIdx, oneIdx, oneIdx,
+            air::WaitAllOp::create(builder, loc, air::AsyncTokenType::get(ctx),
+                                   air::getAsyncDependenciesFromOp(op))
                 .getAsyncToken());
         for (auto dep : air::getAsyncDependenciesFromOp(op))
           remap.map(dep, newForOp.getRegionIterArgs()[0]);
       } else
-        newForOp = builder.create<scf::ForOp>(loc, zeroIdx, oneIdx, oneIdx);
+        newForOp = scf::ForOp::create(builder, loc, zeroIdx, oneIdx, oneIdx);
       builder.setInsertionPointToStart(newForOp.getBody());
       auto newOp = dyn_cast<T>(builder.clone(*op, remap));
 
       if (auto oldAsyncToken = air::getAsyncTokenFromOp(op)) {
-        builder.create<scf::YieldOp>(loc, newOp.getAsyncToken());
+        scf::YieldOp::create(builder, loc, newOp.getAsyncToken());
         oldAsyncToken.replaceAllUsesWith(newForOp->getResult(0));
       } else
-        builder.create<scf::YieldOp>(loc);
+        scf::YieldOp::create(builder, loc);
     }
     for (auto e : ops)
       e->erase();
@@ -3645,6 +3727,12 @@ private:
     }
   }
 
+  // Helper function to check if two channels have the same channel_type
+  // attribute
+  bool haveSameChannelType(air::ChannelOp chan_a, air::ChannelOp chan_b) {
+    return chan_a.getChannelType() == chan_b.getChannelType();
+  }
+
   // Check whether puts and gets hit the aggressive mode target memory spaces
   bool hitsMemorySpaceForAggMode(std::vector<air::ChannelPutOp> &puts,
                                  std::vector<air::ChannelGetOp> &gets) {
@@ -3668,6 +3756,10 @@ private:
   }
 
   bool checkIfMergeable(air::ChannelOp chan_a, air::ChannelOp chan_b) {
+    // Check if channels have the same channel_type
+    if (!haveSameChannelType(chan_a, chan_b))
+      return false;
+
     // Check which memory space to time-multiplex channels onto.
     if (targetMemorySpaces.empty())
       return false;
@@ -3875,6 +3967,12 @@ private:
   // for loop (NFL).
   std::tuple<bool, std::string>
   checkIfTemporalMergeable(air::ChannelOp chan_a, air::ChannelOp chan_b) {
+    std::tuple<bool, std::string> notMergeable = {false, ""};
+
+    // Check if channels have the same channel_type
+    if (!haveSameChannelType(chan_a, chan_b))
+      return notMergeable;
+
     std::vector<air::ChannelPutOp> a_puts =
         getChannelPutOpThroughSymbol(chan_a);
     std::vector<air::ChannelPutOp> b_puts =
@@ -3883,7 +3981,6 @@ private:
         getChannelGetOpThroughSymbol(chan_a);
     std::vector<air::ChannelGetOp> b_gets =
         getChannelGetOpThroughSymbol(chan_b);
-    std::tuple<bool, std::string> notMergeable = {false, ""};
     std::tuple<bool, std::string> mergeableToLB = {true, "LB"};
     std::tuple<bool, std::string> mergeableToUB = {true, "UB"};
     std::tuple<bool, std::string> mergeableNoForLoop = {true, "NFL"};
@@ -4107,8 +4204,8 @@ private:
     rewriter.setInsertionPointAfter(a);
     auto new_b = air::cloneOpAndOperands(rewriter, remap, b);
     if (air::isAsyncOp(a) && air::isAsyncOp(new_b)) {
-      auto newWaitAll = rewriter.create<air::WaitAllOp>(
-          a->getLoc(), air::AsyncTokenType::get(a->getContext()),
+      auto newWaitAll = air::WaitAllOp::create(
+          rewriter, a->getLoc(), air::AsyncTokenType::get(a->getContext()),
           SmallVector<Value>{air::getAsyncTokenFromOp(a),
                              air::getAsyncTokenFromOp(new_b)});
       air::getAsyncTokenFromOp(a).replaceAllUsesExcept(
@@ -4355,9 +4452,9 @@ private:
 
       // Create constant bounds: lb = 0, ub = 2, step = 1.
       auto loc = parentOp->getLoc();
-      auto lb = builder.create<arith::ConstantIndexOp>(loc, 0);
-      auto ub = builder.create<arith::ConstantIndexOp>(loc, 2);
-      auto step = builder.create<arith::ConstantIndexOp>(loc, 1);
+      auto lb = arith::ConstantIndexOp::create(builder, loc, 0);
+      auto ub = arith::ConstantIndexOp::create(builder, loc, 2);
+      auto step = arith::ConstantIndexOp::create(builder, loc, 1);
 
       // Prepare to create the new loop. Also set up a remapping for SSA values
       // (used when cloning the original op to preserve async dependencies).
@@ -4369,17 +4466,16 @@ private:
       //   - Pass the resulting token as the loop's iter_arg.
       //   - Map original async dependencies to the loop's iter_arg.
       if (air::getAsyncTokenFromOp(parentOp)) {
-        newForOp = builder.create<scf::ForOp>(
-            loc, lb, ub, step,
-            builder
-                .create<air::WaitAllOp>(
-                    loc, air::AsyncTokenType::get(builder.getContext()),
-                    air::getAsyncDependenciesFromOp(parentOp))
+        newForOp = scf::ForOp::create(
+            builder, loc, lb, ub, step,
+            air::WaitAllOp::create(
+                builder, loc, air::AsyncTokenType::get(builder.getContext()),
+                air::getAsyncDependenciesFromOp(parentOp))
                 .getAsyncToken());
         for (auto dep : air::getAsyncDependenciesFromOp(parentOp))
           remap.map(dep, newForOp.getRegionIterArgs()[0]);
       } else // Create a standard for loop with no async iter_args.
-        newForOp = builder.create<scf::ForOp>(loc, lb, ub, step);
+        newForOp = scf::ForOp::create(builder, loc, lb, ub, step);
       // Set insertion point to the start of the loop body so that we can clone
       // the op.
       builder.setInsertionPointToStart(newForOp.getBody());
@@ -4391,10 +4487,10 @@ private:
       //   - If the cloned op produces an async token, yield it.
       //   - Replace all uses of the old async token with the loop's result.
       if (auto oldAsyncToken = air::getAsyncTokenFromOp(parentOp)) {
-        builder.create<scf::YieldOp>(loc, air::getAsyncTokenFromOp(newOp));
+        scf::YieldOp::create(builder, loc, air::getAsyncTokenFromOp(newOp));
         oldAsyncToken.replaceAllUsesWith(newForOp->getResult(0));
       } else
-        builder.create<scf::YieldOp>(loc);
+        scf::YieldOp::create(builder, loc);
 
       // Finally, erase the original parent operation since it has been replaced
       // by the loop.
@@ -4640,6 +4736,25 @@ public:
 private:
 };
 
+// A pattern which attempts to fix memref.subview output type, after memref
+// shrinkage changes the memref shapes being allocated.
+struct UpdateSubViewOutputTypeAfterMemrefShrinkage
+    : public OpRewritePattern<memref::SubViewOp> {
+  using OpRewritePattern<memref::SubViewOp>::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(memref::SubViewOp op,
+                                PatternRewriter &rewriter) const override {
+    MemRefType newResultType = memref::SubViewOp::inferRankReducedResultType(
+        op.getType().getShape(), op.getSourceType(), op.getMixedOffsets(),
+        op.getMixedSizes(), op.getMixedStrides());
+    if (newResultType != op.getType()) {
+      op.getResult().setType(newResultType);
+      return success();
+    } else
+      return failure();
+  }
+};
+
 // A pattern which attempts to shrink the memref sizes, based on the access
 // patterns of all its uses.
 struct ShrinkMemrefSizesByAccessPattern
@@ -4735,16 +4850,17 @@ struct ShrinkMemrefSizesByAccessPattern
                                            nullptr, memorySpace);
       if (auto execOp = dyn_cast<air::ExecuteOp>(alloc->getParentOp())) {
         rewriter.setInsertionPoint(execOp);
-        auto newExecOp = rewriter.create<air::ExecuteOp>(
-            execOp->getLoc(), air::AsyncTokenType::get(rewriter.getContext()),
-            newMemrefType, execOp.getAsyncDependencies());
+        auto newExecOp = air::ExecuteOp::create(
+            rewriter, execOp->getLoc(),
+            air::AsyncTokenType::get(rewriter.getContext()), newMemrefType,
+            execOp.getAsyncDependencies());
         Block *async_exec_bb = rewriter.createBlock(&newExecOp.getRegion());
         rewriter.setInsertionPointToStart(async_exec_bb);
         auto newAlloc =
-            rewriter.create<memref::AllocOp>(alloc->getLoc(), newMemrefType);
+            memref::AllocOp::create(rewriter, alloc->getLoc(), newMemrefType);
         newAlloc->setAttr("shrinkage", rewriter.getBoolAttr(true));
-        rewriter.create<air::ExecuteTerminatorOp>(rewriter.getUnknownLoc(),
-                                                  newAlloc.getResult());
+        air::ExecuteTerminatorOp::create(rewriter, rewriter.getUnknownLoc(),
+                                         newAlloc.getResult());
         for (unsigned i = 0; i < execOp->getNumResults(); i++)
           execOp->getResult(i).replaceAllUsesWith(newExecOp->getResult(i));
         // For air hierarchy ops, also update the argument type
@@ -4760,7 +4876,7 @@ struct ShrinkMemrefSizesByAccessPattern
       } else {
         rewriter.setInsertionPoint(alloc);
         auto newAlloc =
-            rewriter.create<memref::AllocOp>(alloc->getLoc(), newMemrefType);
+            memref::AllocOp::create(rewriter, alloc->getLoc(), newMemrefType);
         newAlloc->setAttr("shrinkage", rewriter.getBoolAttr(true));
         alloc.getResult().replaceAllUsesWith(newAlloc.getResult());
         rewriter.eraseOp(alloc);
@@ -4842,8 +4958,8 @@ private:
          i < offsetListIdxOffset + chanOp.getOffsets().size(); i++) {
       if (new_offsets[i - offsetListIdxOffset] < 0)
         continue;
-      chanOp->getOpOperand(i).assign(rewriter.create<arith::ConstantIndexOp>(
-          chanOp->getLoc(), new_offsets[i - offsetListIdxOffset]));
+      chanOp->getOpOperand(i).assign(arith::ConstantIndexOp::create(
+          rewriter, chanOp->getLoc(), new_offsets[i - offsetListIdxOffset]));
     }
     // Update strides.
     auto new_strides = getUpdatedStridesAfterShrinkage(
@@ -4852,8 +4968,8 @@ private:
                               chanOp.getSizes().size();
     for (unsigned i = strideListIdxOffset;
          i < strideListIdxOffset + chanOp.getStrides().size(); i++) {
-      chanOp->getOpOperand(i).assign(rewriter.create<arith::ConstantIndexOp>(
-          chanOp->getLoc(), new_strides[i - strideListIdxOffset]));
+      chanOp->getOpOperand(i).assign(arith::ConstantIndexOp::create(
+          rewriter, chanOp->getLoc(), new_strides[i - strideListIdxOffset]));
     }
     return success();
   }
@@ -5028,8 +5144,6 @@ private:
     if (allOffsetsAreZeros() && allStridesAreOnes() &&
         memrefVolumeUnchanged()) {
       subViewOp.getResult().replaceAllUsesWith(subViewOp.getSource());
-      for (auto newUser : subViewOp.getSource().getUsers())
-        push_back_if_unique<Operation *>(users, newUser);
       rewriter.eraseOp(subViewOp);
     }
     return success();
@@ -5068,16 +5182,16 @@ private:
         if (!herdOp)
           continue;
         rewriter.setInsertionPointToStart(&herdOp.getBody().front());
-        Value constZero = rewriter.create<arith::ConstantIndexOp>(
-            rewriter.getUnknownLoc(), 0);
+        Value constZero = arith::ConstantIndexOp::create(
+            rewriter, rewriter.getUnknownLoc(), 0);
         defOp->replaceUsesOfWith(oper, constZero);
         for (auto &reg : defOp->getRegions())
           replaceAllUsesInRegionWith(oper, constZero, reg);
       }
     } else if (auto herdOp = air::getHerdArgOwner(index)) {
       rewriter.setInsertionPointToStart(&herdOp.getBody().front());
-      return rewriter.create<arith::ConstantIndexOp>(rewriter.getUnknownLoc(),
-                                                     0);
+      return arith::ConstantIndexOp::create(rewriter, rewriter.getUnknownLoc(),
+                                            0);
     }
     return nullptr;
   }
@@ -5154,12 +5268,12 @@ scf::ForOp simpleScfForLoopTiling(scf::ForOp forOp, int original_step,
   auto loc = forOp->getLoc();
   OpBuilder builder(forOp);
   forOp.getStepMutable().assign(
-      builder.create<arith::ConstantIndexOp>(loc, original_step));
+      arith::ConstantIndexOp::create(builder, loc, original_step));
   builder.setInsertionPointToStart(forOp.getBody());
-  auto new_for_op = builder.create<scf::ForOp>(
-      loc, builder.create<arith::ConstantIndexOp>(loc, 0),
-      builder.create<arith::ConstantIndexOp>(loc, original_step),
-      builder.create<arith::ConstantIndexOp>(loc, tiled_step),
+  auto new_for_op = scf::ForOp::create(
+      builder, loc, arith::ConstantIndexOp::create(builder, loc, 0),
+      arith::ConstantIndexOp::create(builder, loc, original_step),
+      arith::ConstantIndexOp::create(builder, loc, tiled_step),
       forOp.getRegionIterArgs());
   builder.setInsertionPointToStart(new_for_op.getBody());
   IRMapping remap;
@@ -5179,9 +5293,9 @@ scf::ForOp simpleScfForLoopTiling(scf::ForOp forOp, int original_step,
   }
   if (!new_for_op.getBody()->mightHaveTerminator()) {
     if (yielded_token)
-      builder.create<scf::YieldOp>(loc, yielded_token);
+      scf::YieldOp::create(builder, loc, yielded_token);
     else
-      builder.create<scf::YieldOp>(loc);
+      scf::YieldOp::create(builder, loc);
   }
   for (auto o : erased) {
     // Replace all remaining uses of erased op's token with the new for op's.
@@ -5485,19 +5599,20 @@ LogicalResult fuseLoopsInRegion(Region *region, PatternRewriter &rewriter,
 
   rewriter.setInsertionPointAfter(equalIterationForOps.back().front());
   auto new_loop_op_init_arg =
-      rewriter
-          .create<air::WaitAllOp>(loc, air::AsyncTokenType::get(ctx),
-                                  SmallVector<Value>{})
+      air::WaitAllOp::create(rewriter, loc, air::AsyncTokenType::get(ctx),
+                             SmallVector<Value>{})
           .getAsyncToken();
   scf::ForOp new_loop_op = nullptr; // Inner-most newly created scf.for op.
   for (unsigned i = 0; i < equalIterFirstBand.size(); i++) {
-    new_loop_op = rewriter.create<scf::ForOp>(
-        rewriter.getUnknownLoc(), equalIterFirstBand[i].getLowerBound(),
-        equalIterFirstBand[i].getUpperBound(), equalIterFirstBand[i].getStep(),
-        SmallVector<Value>{new_loop_op_init_arg});
+    new_loop_op = scf::ForOp::create(rewriter, rewriter.getUnknownLoc(),
+                                     equalIterFirstBand[i].getLowerBound(),
+                                     equalIterFirstBand[i].getUpperBound(),
+                                     equalIterFirstBand[i].getStep(),
+                                     SmallVector<Value>{new_loop_op_init_arg});
     if (i > 0) {
       // Create scf.yield for perfectly nested scf.for.
-      rewriter.create<scf::YieldOp>(loc, air::getAsyncTokenFromOp(new_loop_op));
+      scf::YieldOp::create(rewriter, loc,
+                           air::getAsyncTokenFromOp(new_loop_op));
     }
     // Dive in.
     rewriter.setInsertionPointToStart(new_loop_op.getBody());
@@ -5564,9 +5679,9 @@ LogicalResult fuseLoopsInRegion(Region *region, PatternRewriter &rewriter,
       }
     }
   }
-  auto wa_op = rewriter.create<air::WaitAllOp>(
-      loc, air::AsyncTokenType::get(ctx), yield_dep_list);
-  rewriter.create<scf::YieldOp>(loc, wa_op.getAsyncToken());
+  auto wa_op = air::WaitAllOp::create(
+      rewriter, loc, air::AsyncTokenType::get(ctx), yield_dep_list);
+  scf::YieldOp::create(rewriter, loc, wa_op.getAsyncToken());
 
   // Map from channel.put (or any parent scf.for op) to dependent channel.get.
   std::vector<Operation *> put_parents;
@@ -5679,7 +5794,8 @@ public:
   void runPostProcPatterns(func::FuncOp funcOp) {
     MLIRContext *ctx = funcOp.getContext();
     RewritePatternSet patterns(&getContext());
-    patterns.insert<ShrinkMemrefSizesByAccessPattern>(ctx);
+    patterns.insert<ShrinkMemrefSizesByAccessPattern,
+                    UpdateSubViewOutputTypeAfterMemrefShrinkage>(ctx);
     (void)applyPatternsGreedily(funcOp, std::move(patterns));
     // Update func.call declaration post memref shrinkage
     SmallVector<memref::AllocOp> shrunkMemallocs;
@@ -5761,36 +5877,6 @@ private:
   }
 };
 
-// Generate a wait_all at the end of block, which gathers all dangling async
-// tokens.
-FailureOr<air::WaitAllOp>
-generateWaitAllToTerminateBlock(Block &block, OpBuilder &b,
-                                bool isBlocking = true) {
-  llvm::SetVector<Value> blockTokens, danglingTokens;
-  blockTokens.insert(block.getArguments().begin(), block.getArguments().end());
-  for (auto &o : block.getOperations())
-    blockTokens.insert(o.getResults().begin(), o.getResults().end());
-  for (auto t : blockTokens) {
-    if (!t.use_empty())
-      continue;
-    if (!isa<air::AsyncTokenType>(t.getType()))
-      continue;
-    danglingTokens.insert(t);
-  }
-  if (block.mightHaveTerminator())
-    b.setInsertionPoint(block.getTerminator());
-  else
-    b.setInsertionPointToEnd(&block);
-  if (isBlocking)
-    return b.create<air::WaitAllOp>(b.getUnknownLoc(),
-                                    /*result_type*/ std::nullopt,
-                                    danglingTokens.takeVector());
-  else
-    return b.create<air::WaitAllOp>(b.getUnknownLoc(),
-                                    air::AsyncTokenType::get(b.getContext()),
-                                    danglingTokens.takeVector());
-}
-
 // Air launch is converted to scf for loop nest here, so as to enable
 // compile-time shim dma bd optimizations.
 struct AIRLaunchToScfForPattern : public OpRewritePattern<air::LaunchOp> {
@@ -5808,8 +5894,8 @@ struct AIRLaunchToScfForPattern : public OpRewritePattern<air::LaunchOp> {
     // Create a dummy single-iteration air launch op in place of the original
     // launch, to preserve the original launch's region which represents the
     // lifetime of all hardware inside it.
-    auto dummyLaunch = rewriter.create<air::LaunchOp>(
-        loc, /*async_dependencies*/ SmallVector<Value>(),
+    auto dummyLaunch = air::LaunchOp::create(
+        rewriter, loc, /*async_dependencies*/ SmallVector<Value>(),
         /*sizes*/ SmallVector<Value>(), launch.getKernelOperands(),
         /*is_async*/ true);
     dummyLaunch->setAttrs(launch->getDiscardableAttrDictionary());
@@ -5817,14 +5903,14 @@ struct AIRLaunchToScfForPattern : public OpRewritePattern<air::LaunchOp> {
     rewriter.setInsertionPointToStart(&dummyLaunch.getBody().front());
 
     SmallVector<Value> lbs, ubs, steps;
-    auto c0 = rewriter.create<arith::ConstantIndexOp>(loc, 0);
-    auto c1 = rewriter.create<arith::ConstantIndexOp>(loc, 1);
+    auto c0 = arith::ConstantIndexOp::create(rewriter, loc, 0);
+    auto c1 = arith::ConstantIndexOp::create(rewriter, loc, 1);
 
     // make scf.for loop nest to replace air.launch
     for (auto d : launch.getSizeOperands()) {
       lbs.push_back(c0);
       auto const_d = getConstantIntValue(d);
-      ubs.push_back(rewriter.create<arith::ConstantIndexOp>(loc, *const_d));
+      ubs.push_back(arith::ConstantIndexOp::create(rewriter, loc, *const_d));
       steps.push_back(c1);
     }
     if (lbs.empty()) {
@@ -5839,15 +5925,16 @@ struct AIRLaunchToScfForPattern : public OpRewritePattern<air::LaunchOp> {
     // Serialize launch into scf.for.
     SmallVector<Value> iterArgs;
     if (air::isAsyncOp(launch)) {
-      auto waitAll = rewriter.create<air::WaitAllOp>(
-          loc, air::AsyncTokenType::get(context), SmallVector<Value>{});
+      auto waitAll = air::WaitAllOp::create(rewriter, loc,
+                                            air::AsyncTokenType::get(context),
+                                            SmallVector<Value>{});
       iterArgs.push_back(waitAll.getAsyncToken());
     }
     for (unsigned i = 0; i < lbs.size(); i++) {
       auto scfFor =
-          rewriter.create<scf::ForOp>(loc, lbs[i], ubs[i], steps[i], iterArgs);
+          scf::ForOp::create(rewriter, loc, lbs[i], ubs[i], steps[i], iterArgs);
       if (i != 0 && scfFor->getNumResults())
-        rewriter.create<scf::YieldOp>(loc, scfFor->getResults());
+        scf::YieldOp::create(rewriter, loc, scfFor->getResults());
       iterArgs.clear();
       for (auto v : scfFor.getRegionIterArgs())
         iterArgs.push_back(v);
@@ -5881,10 +5968,8 @@ struct AIRLaunchToScfForPattern : public OpRewritePattern<air::LaunchOp> {
       OpBuilder::InsertionGuard guard(rewriter);
       auto wa = generateWaitAllToTerminateBlock(*body, rewriter,
                                                 /*isBlocking*/ false);
-      if (failed(wa))
-        return failure();
-      rewriter.create<scf::YieldOp>(rewriter.getUnknownLoc(),
-                                    wa->getAsyncToken());
+      scf::YieldOp::create(rewriter, rewriter.getUnknownLoc(),
+                           wa.getAsyncToken());
     }
 
     // replace output events with air.wait_all
@@ -5966,8 +6051,8 @@ public:
       OpBuilder::InsertionGuard guard(b);
       SmallVector<Value> optTileSizes;
       for (unsigned i = 0; i < clTileSizes.size(); ++i) {
-        optTileSizes.push_back(b.create<arith::ConstantIndexOp>(
-            b.getUnknownLoc(), clTileSizes[i]));
+        optTileSizes.push_back(arith::ConstantIndexOp::create(
+            b, b.getUnknownLoc(), clTileSizes[i]));
       }
       return optTileSizes;
     };
@@ -5987,8 +6072,8 @@ public:
       for (size_t i = 0;
            i < std::min(perfectlyNestedLoops.size(), optTileSizes.size());
            i++) {
-        auto largestFactor = b.create<arith::ConstantIndexOp>(
-            b.getUnknownLoc(),
+        auto largestFactor = arith::ConstantIndexOp::create(
+            b, b.getUnknownLoc(),
             air::findLargestFactor(
                 *air::getStaticScfForTripCountAsInt(perfectlyNestedLoops[i]),
                 *getConstantIntValue(optTileSizes[i])));
@@ -6030,15 +6115,18 @@ public:
         // to make it blocking.
         rewriter.setInsertionPointAfter(tiledLoops.front());
         auto blockingWaitAll = rewriter.replaceOpWithNewOp<air::WaitAllOp>(
-            tiledLoops.front()->getNextNode(), /*result_type*/ std::nullopt,
+            tiledLoops.front()->getNextNode(), /*result_type*/ Type(),
             tiledLoops.front()->getResult(0));
+        // Label this wait_all as the end of a launch body so that later
+        // passes can identify it for reconfiguration operations.
+        blockingWaitAll->setAttr("air.launch_end", rewriter.getUnitAttr());
         rewriter.setInsertionPointAfter(blockingWaitAll);
-        auto disconnectedWaitAll = rewriter.create<air::WaitAllOp>(
-            tiledLoops.front()->getLoc(),
+        auto disconnectedWaitAll = air::WaitAllOp::create(
+            rewriter, tiledLoops.front()->getLoc(),
             air::AsyncTokenType::get(rewriter.getContext()),
             SmallVector<Value>{});
-        rewriter.create<scf::YieldOp>(rewriter.getUnknownLoc(),
-                                      disconnectedWaitAll.getAsyncToken());
+        scf::YieldOp::create(rewriter, rewriter.getUnknownLoc(),
+                             disconnectedWaitAll.getAsyncToken());
       }
 
       // Unroll for loop nest from root down until shim-dma-unroll-depth.
@@ -6105,9 +6193,12 @@ public:
             rewriter.setInsertionPoint(blk->getTerminator());
           else
             rewriter.setInsertionPointToEnd(blk);
-          rewriter.create<air::WaitAllOp>(rewriter.getUnknownLoc(),
-                                          /*result_type*/ std::nullopt,
-                                          chanTokens);
+          auto launchEndWaitAll =
+              air::WaitAllOp::create(rewriter, rewriter.getUnknownLoc(),
+                                     /*result_type*/ Type(), chanTokens);
+          // Label this wait_all as the end of a launch body so that later
+          // passes can identify it for reconfiguration operations.
+          launchEndWaitAll->setAttr("air.launch_end", rewriter.getUnitAttr());
         }
       }
     }
@@ -6185,9 +6276,14 @@ public:
       IRRewriter rewriter(func.getContext());
       if (air::isAsyncOp(seg)) {
         OpBuilder::InsertionGuard guard(rewriter);
-        if (failed(generateWaitAllToTerminateBlock(
-                seg.getBody().front(), rewriter, /*isBlocking*/ true)))
+        auto segEndWaitAll =
+            generateWaitAllToTerminateBlock(seg.getBody().front(), rewriter,
+                                            /*isBlocking*/ true);
+        if (!segEndWaitAll)
           signalPassFailure();
+        // Label this wait_all as the end of a segment body so that later
+        // passes can identify it for reconfiguration operations.
+        segEndWaitAll->setAttr("air.segment_end", rewriter.getUnitAttr());
       }
     }
   }
@@ -6467,9 +6563,9 @@ struct AIRFuseAllocDeallocToAIRHierarchy : public OpRewritePattern<OpTy> {
 
     // Update air.hierarchy args.
     rewriter.setInsertionPoint(op);
-    auto newHerd = rewriter.create<OpTy>(
-        op->getLoc(), deps, op.getSizeOperands(), kernelOpers,
-        (bool)op.getAsyncToken(), op->getAttrs());
+    auto newHerd =
+        OpTy::create(rewriter, op->getLoc(), deps, op.getSizeOperands(),
+                     kernelOpers, (bool)op.getAsyncToken(), op->getAttrs());
     for (unsigned i = 0; i < op.getNumDims(); i++) {
       rewriter.replaceAllUsesWith(op.getIds()[i], newHerd.getIds()[i]);
       rewriter.replaceAllUsesWith(op.getSize()[i], newHerd.getSize()[i]);
@@ -6530,7 +6626,8 @@ public:
     MLIRContext *ctx = &getContext();
     auto funcOp = getOperation();
     RewritePatternSet patterns(&getContext());
-    patterns.insert<ShrinkMemrefSizesByAccessPattern>(ctx);
+    patterns.insert<ShrinkMemrefSizesByAccessPattern,
+                    UpdateSubViewOutputTypeAfterMemrefShrinkage>(ctx);
     (void)applyPatternsGreedily(funcOp, std::move(patterns));
     // Update func.call declaration after memref shrinkage
     SmallVector<memref::AllocOp> shrunkMemallocs;
@@ -6699,6 +6796,35 @@ void populateAIRLoopIndexCanonicalizationPatterns(RewritePatternSet &patterns) {
   patterns.insert<CanonicalizeAffineApplyOnLoopInductionVar>(ctx);
 }
 
+// Fold affine.apply operations on loop induction variables into the loop
+// bounds. Returns success if any transformation was applied.
+FailureOr<scf::ForOp> foldAffineApplyIntoLoopBounds(scf::ForOp forOp,
+                                                    RewriterBase &rewriter) {
+  // Find the affine.apply operation in the loop body that operates on
+  // the loop's induction variable with single use
+  affine::AffineApplyOp targetApply;
+  Value loopIV = forOp.getInductionVar();
+
+  forOp.walk([&](affine::AffineApplyOp applyOp) {
+    // Check if this affine.apply operates on the loop induction variable
+    // and matches the criteria in foldSingleAffineApplyIntoScfForBounds
+    if (applyOp.getAffineMap().getNumInputs() == 1) {
+      Value operand = applyOp.getOperand(0);
+      if (operand == loopIV && operand.hasOneUse() &&
+          !applyOp.getResult().use_empty()) {
+        targetApply = applyOp;
+        return;
+      }
+    }
+  });
+
+  if (!targetApply)
+    return failure();
+
+  // Reuse the existing utility function
+  return foldSingleAffineApplyIntoScfForBounds(forOp, targetApply, rewriter);
+}
+
 void populateAIRCanonicalizeChannelWrapAndStridePatterns(
     RewritePatternSet &patterns, int &maxSize, int &maxNumDims,
     bool &enableRepeatAtHighestDim) {
@@ -6726,13 +6852,6 @@ void populateAIRLoopFusionPattern(RewritePatternSet &patterns) {
 
 void applyAIRIsolateAsyncDmaLoopNestsPattern(Region *region) {
   (void)AIRIsolateAsyncDmaLoopNestsImpl(region);
-}
-
-void populateAIRFuseAllocDeallocToAIRHierPatterns(RewritePatternSet &patterns) {
-  MLIRContext *ctx = patterns.getContext();
-  patterns.insert<AIRFuseAllocDeallocToAIRHierarchy<air::LaunchOp>,
-                  AIRFuseAllocDeallocToAIRHierarchy<air::SegmentOp>,
-                  AIRFuseAllocDeallocToAIRHierarchy<air::HerdOp>>(ctx);
 }
 
 } // namespace air

@@ -14,7 +14,7 @@ import filelock
 
 parser = argparse.ArgumentParser(
     prog="run.py",
-    description="Builds, runs, and tests the matmul example",
+    description="Builds, runs, and tests the softmax example",
 )
 parser.add_argument(
     "--transform-script",
@@ -36,6 +36,19 @@ parser.add_argument(
     dest="N",
     default=256,
     help="N (reduction) dimension size",
+)
+parser.add_argument(
+    "--compile-only",
+    action="store_true",
+    help="Only compile to xclbin without running validation (for profiling)",
+)
+parser.add_argument(
+    "--debug-ir",
+    type=str,
+    dest="debug_ir",
+    default=None,
+    metavar="OUTPUT_FILE",
+    help="Print the transformed IR to the specified file and exit (for debugging)",
 )
 args = parser.parse_args()
 
@@ -70,9 +83,10 @@ with air.ir.Context() as ctx, Location.unknown():
         memref.copy %reinterpret_cast, %alloc : memref<4x256xf32, strided<[256, 1], offset: ?>> to memref<4x256xf32>
         %3 = bufferization.to_tensor %alloc restrict writable : memref<4x256xf32> to tensor<4x256xf32>
         %4 = tensor.empty() : tensor<256x4xf32>
+        %transposed = linalg.transpose ins(%3 : tensor<4x256xf32>) outs(%4 : tensor<256x4xf32>) permutation = [1, 0] 
         %5 = tensor.empty() : tensor<4xf32>
         %6 = linalg.fill ins(%cst : f32) outs(%5 : tensor<4xf32>) -> tensor<4xf32>
-        %reduced = linalg.reduce ins(%3 : tensor<4x256xf32>) outs(%6 : tensor<4xf32>) dimensions = [1] 
+        %reduced = linalg.reduce ins(%transposed : tensor<256x4xf32>) outs(%6 : tensor<4xf32>) dimensions = [0] 
           (%in: f32, %init: f32) {
             %14 = arith.maxnumf %in, %init : f32
             linalg.yield %14 : f32
@@ -84,8 +98,8 @@ with air.ir.Context() as ctx, Location.unknown():
           linalg.yield %in : f32
         } -> tensor<4x256xf32>
         %9 = linalg.generic {indexing_maps = [#map1, #map1, #map1], iterator_types = ["parallel", "parallel"]} ins(%3, %8 : tensor<4x256xf32>, tensor<4x256xf32>) outs(%3 : tensor<4x256xf32>) {
-        ^bb0(%in: f32, %in_4: f32, %out: f32):
-          %14 = arith.subf %in, %in_4 : f32
+        ^bb0(%in: f32, %in_5: f32, %out: f32):
+          %14 = arith.subf %in, %in_5 : f32
           linalg.yield %14 : f32
         } -> tensor<4x256xf32>
         %10 = linalg.generic {indexing_maps = [#map1, #map1], iterator_types = ["parallel", "parallel"]} ins(%9 : tensor<4x256xf32>) outs(%9 : tensor<4x256xf32>) {
@@ -93,24 +107,25 @@ with air.ir.Context() as ctx, Location.unknown():
           %14 = math.exp %in : f32
           linalg.yield %14 : f32
         } -> tensor<4x256xf32>
+        %transposed_1 = linalg.transpose ins(%10 : tensor<4x256xf32>) outs(%4 : tensor<256x4xf32>) permutation = [1, 0] 
         %11 = linalg.fill ins(%cst_0 : f32) outs(%5 : tensor<4xf32>) -> tensor<4xf32>
-        %reduced_1 = linalg.reduce ins(%10 : tensor<4x256xf32>) outs(%11 : tensor<4xf32>) dimensions = [1] 
+        %reduced_2 = linalg.reduce ins(%transposed_1 : tensor<256x4xf32>) outs(%11 : tensor<4xf32>) dimensions = [0] 
           (%in: f32, %init: f32) {
             %14 = arith.addf %in, %init : f32
             linalg.yield %14 : f32
           }
-        %expanded_2 = tensor.expand_shape %reduced_1 [[0, 1]] output_shape [4, 1] : tensor<4xf32> into tensor<4x1xf32>
-        %12 = linalg.generic {indexing_maps = [#map, #map1], iterator_types = ["parallel", "parallel"]} ins(%expanded_2 : tensor<4x1xf32>) outs(%7 : tensor<4x256xf32>) attrs =  {broadcastDims = array<i64: 1>} {
+        %expanded_3 = tensor.expand_shape %reduced_2 [[0, 1]] output_shape [4, 1] : tensor<4xf32> into tensor<4x1xf32>
+        %12 = linalg.generic {indexing_maps = [#map, #map1], iterator_types = ["parallel", "parallel"]} ins(%expanded_3 : tensor<4x1xf32>) outs(%7 : tensor<4x256xf32>) attrs =  {broadcastDims = array<i64: 1>} {
         ^bb0(%in: f32, %out: f32):
           linalg.yield %in : f32
         } -> tensor<4x256xf32>
         %13 = linalg.generic {indexing_maps = [#map1, #map1, #map1], iterator_types = ["parallel", "parallel"]} ins(%10, %12 : tensor<4x256xf32>, tensor<4x256xf32>) outs(%10 : tensor<4x256xf32>) {
-        ^bb0(%in: f32, %in_4: f32, %out: f32):
-          %14 = arith.divf %in, %in_4 : f32
+        ^bb0(%in: f32, %in_5: f32, %out: f32):
+          %14 = arith.divf %in, %in_5 : f32
           linalg.yield %14 : f32
         } -> tensor<4x256xf32>
-        %reinterpret_cast_3 = memref.reinterpret_cast %arg1 to offset: [%2], sizes: [4, 256], strides: [256, 1] : memref<*xf32> to memref<4x256xf32, strided<[256, 1], offset: ?>>
-        bufferization.materialize_in_destination %13 in writable %reinterpret_cast_3 : (tensor<4x256xf32>, memref<4x256xf32, strided<[256, 1], offset: ?>>) -> ()
+        %reinterpret_cast_4 = memref.reinterpret_cast %arg1 to offset: [%2], sizes: [4, 256], strides: [256, 1] : memref<*xf32> to memref<4x256xf32, strided<[256, 1], offset: ?>>
+        bufferization.materialize_in_destination %13 in writable %reinterpret_cast_4 : (tensor<4x256xf32>, memref<4x256xf32, strided<[256, 1], offset: ?>>) -> ()
         return
       }
     }
@@ -144,8 +159,19 @@ with air.ir.Context() as ctx, Location.unknown():
     transform_ir = Module.parse(transform_ir_string)
     run_transform(transform_ir, air_module)
 
+    # Print the IR for debugging and exit if --debug-ir is specified
+    if args.debug_ir:
+        import os
+
+        output_file = args.debug_ir
+        os.makedirs(os.path.dirname(output_file) or ".", exist_ok=True)
+        with open(output_file, "w") as f:
+            f.write(str(air_module))
+        print(f"Transformed IR written to {output_file}")
+        exit(0)
+
     ###############################################
-    # Binding scf.paralell to air hierarchies
+    # Binding scf.parallel to air hierarchies
     ###############################################
     M, N = args.M, args.N
     input_size = (M, N)
@@ -157,7 +183,6 @@ with air.ir.Context() as ctx, Location.unknown():
         + ",".join(
             [
                 f"func.func(air-wrap-func-with-parallel{{loop-bounds={launch_size[0]},{launch_size[1]},1}})",
-                "air-par-to-herd{depth=-1}",
                 "air-par-to-launch{depth=-1 has-air-segment=true}",
                 "air-copy-to-dma",
                 "canonicalize",
@@ -173,19 +198,32 @@ with air.ir.Context() as ctx, Location.unknown():
     # Run compile and load
     ###############################################
 
-    input_type = np.float32
-    A = np.random.rand(M, N).astype(input_type)  # Shape [M, N]
-    C = softmax(A).astype(input_type)
+    if args.compile_only:
+        # Compile-only mode: generate xclbin and instruction binary without validation
+        print("Compile-only mode: generating xclbin and instruction binary...")
+        backend = XRTBackend(omit_while_true_loop=False)
+        module_function = backend.compile(air_module)
+        backend.unload()
+        print("Compilation complete. Generated files:")
+        print("  - air.xclbin")
+        print("  - air.insts.bin")
+        print("Run profiling with: ./test.exe")
+        exit(0)
+    else:
+        # Normal mode: compile and run validation
+        input_type = np.float32
+        A = np.random.rand(M, N).astype(input_type)  # Shape [M, N]
+        C = softmax(A).astype(input_type)
 
-    ###### Compile and test
-    runner = XRTRunner(
-        omit_while_true_loop=False,
-    )
-    exit(
-        runner.run_test(
-            air_module,
-            inputs=[A],
-            expected_outputs=[C],
-            rtol=1e-2,
+        ###### Compile and test
+        runner = XRTRunner(
+            omit_while_true_loop=False,
         )
-    )
+        exit(
+            runner.run_test(
+                air_module,
+                inputs=[A],
+                expected_outputs=[C],
+                rtol=1e-2,
+            )
+        )
