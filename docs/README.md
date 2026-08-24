@@ -24,6 +24,9 @@ runtimes and compilers.
 ### AIR Compute Model
 - [AIR Compute Model](AIRComputeModel.md) — formal semantics of the AIR hierarchy and memory model, with NPU and GPU backend mappings
 
+### Python DSL
+- [airapi](airapi.md) — high-level Python DSL: compute model, capability system, multi-variant dispatch, and API reference
+
 ### Tutorials
 - [AIR Asynchronous Concurrency](AIRAsyncConcurrency.md)
 - [AIR Runner](AIRRunner.md)
